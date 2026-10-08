@@ -1,0 +1,89 @@
+
+> web-file-transfer@0.1.0 dev
+> next dev
+
+   ▲ Next.js 15.5.25
+   - Local:        http://localhost:3000
+   - Network:      http://192.168.1.77:3000
+
+ ✓ Starting...
+ ✓ Ready in 3.1s
+ ○ Compiling / ...
+ ✓ Compiled / in 3.6s (549 modules)
+ GET / 200 in 1145ms
+ GET / 200 in 66ms
+ ○ Compiling /api/files ...
+ ✓ Compiled /api/files in 567ms (557 modules)
+ GET /api/files 200 in 723ms
+ GET /api/files 200 in 17ms
+ GET / 200 in 315ms
+ GET /api/files 200 in 46ms
+ GET /api/files 200 in 46ms
+ ✓ Compiled /api/p2p/signaling in 283ms (559 modules)
+ POST /api/p2p/signaling 200 in 360ms
+ POST /api/p2p/signaling 200 in 10ms
+ POST /api/p2p/signaling 200 in 10ms
+ POST /api/p2p/signaling 200 in 8ms
+ GET /api/files 200 in 24ms
+ POST /api/p2p/signaling 200 in 9ms
+ POST /api/p2p/signaling 200 in 9ms
+ POST /api/p2p/signaling 200 in 9ms
+ POST /api/p2p/signaling 200 in 9ms
+ POST /api/p2p/signaling 200 in 9ms
+ GET / 200 in 166ms
+ GET /api/files 200 in 11ms
+ GET /api/files 200 in 16ms
+ GET /api/files 200 in 10ms
+ GET /api/files 200 in 10ms
+ GET / 200 in 61ms
+ GET /api/files 200 in 18ms
+ GET /api/files 200 in 10ms
+ POST /api/p2p/signaling 200 in 8ms
+ POST /api/p2p/signaling 200 in 10ms
+ POST /api/p2p/signaling 200 in 9ms
+ GET /api/files 200 in 9ms
+ POST /api/p2p/signaling 200 in 8ms
+ POST /api/p2p/signaling 200 in 9ms
+ GET /api/files 200 in 11ms
+ POST /api/p2p/signaling 200 in 8ms
+ POST /api/p2p/signaling 200 in 8ms
+ POST /api/p2p/signaling 200 in 8ms
+ POST /api/p2p/signaling 200 in 10ms
+ POST /api/p2p/signaling 200 in 9ms
+ GET /api/files 200 in 9ms
+ GET /api/files 200 in 11ms
+ POST /api/p2p/signaling 404 in 8ms
+ POST /api/p2p/signaling 404 in 10ms
+ POST /api/p2p/signaling 200 in 10ms
+ POST /api/p2p/signaling 200 in 9ms
+ GET /api/files 200 in 9ms
+ POST /api/p2p/signaling 200 in 8ms
+ POST /api/p2p/signaling 200 in 8ms
+ GET /api/files 200 in 9ms
+ POST /api/p2p/signaling 200 in 8ms
+ POST /api/p2p/signaling 200 in 12ms
+ POST /api/p2p/signaling 200 in 10ms
+ POST /api/p2p/signaling 200 in 9ms
+ POST /api/p2p/signaling 200 in 9ms
+ POST /api/p2p/signaling 200 in 9ms
+ GET /api/files 200 in 9ms
+ GET /api/files 200 in 10ms
+ GET /api/files 200 in 8ms
+ GET /api/files 200 in 11ms
+ GET /api/files 200 in 9ms
+ GET /api/files 200 in 9ms
+ GET /api/files 200 in 9ms
+ GET / 200 in 131ms
+ GET / 200 in 131ms
+ ✓ Compiled /_not-found in 398ms (564 modules)
+ GET /apple-touch-icon-precomposed.png 404 in 654ms
+ GET /apple-touch-icon.png 404 in 649ms
+ GET /apple-touch-icon-240x240-precomposed.png 404 in 452ms
+ GET /apple-touch-icon-240x240.png 404 in 39ms
+ GET /apple-touch-icon-precomposed.png 404 in 39ms
+ GET /apple-touch-icon.png 404 in 41ms
+ GET /apple-touch-icon-240x240-precomposed.png 404 in 38ms
+ GET /apple-touch-icon-240x240.png 404 in 36ms
+ GET /apple-touch-icon-precomposed.png 404 in 33ms
+ GET /apple-touch-icon.png 404 in 34ms
+ GET /api/files 200 in 26ms
