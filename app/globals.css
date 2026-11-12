@@ -301,6 +301,10 @@ body {
   max-width: 1240px; margin: 0 auto; flex-wrap: wrap;
 }
 
+/* 左右两区等宽，中间模式切换才真正居中（右侧按钮变多时不被挤偏） */
+.n4-top > .n4-brand { flex: 1 1 0; }
+.n4-top-actions { flex: 1 1 0; justify-content: flex-end; }
+
 .n4-brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 16px; color: #111827; }
 
 .n4-logo {
@@ -818,3 +822,39 @@ body {
 .n4-logbox { margin: 0; max-height: 300px; overflow: auto; background: #0f172a; color: #dbeafe; border-radius: 12px; padding: 12px 14px; font-family: 'DM Mono', ui-monospace, monospace; font-size: 11px; line-height: 1.65; white-space: pre-wrap; word-break: break-all; }
 .n4-log-actions { display: flex; gap: 8px; margin-top: 10px; }
 .n4-log-actions .n4-btn-mini { text-decoration: none; }
+
+/* ===== 视图切换 + 列表视图 ===== */
+.n4-viewseg { display: inline-flex; border: 1px solid #ececec; border-radius: 999px; overflow: hidden; margin-left: 10px; vertical-align: middle; }
+.n4-viewseg button { width: 30px; height: 24px; border: none; background: #fff; color: #9ca3af; cursor: pointer; font-size: 12px; display: inline-flex; align-items: center; justify-content: center; }
+.n4-viewseg button.on { background: #111827; color: #fff; }
+.n4-flist { padding: 10px; display: flex; flex-direction: column; }
+.n4-frow { display: flex; align-items: center; gap: 12px; padding: 9px 12px; border-radius: 12px; border-bottom: 1px solid #f7f7f7; }
+.n4-frow:last-child { border-bottom: none; }
+.n4-frow.folder { cursor: pointer; }
+.n4-frow:hover { background: #fafafa; }
+.n4-frow.up { color: #d92525; cursor: pointer; font-weight: 600; }
+.n4-frow-ico { width: 34px; height: 34px; flex: none; border-radius: 10px; background: #f3f4f6; color: #6b7280; display: flex; align-items: center; justify-content: center; font-size: 15px; }
+.n4-frow-ico.folder { background: #fef3c7; color: #d97706; }
+.n4-frow-name { flex: 1; min-width: 0; font-size: 13.5px; font-weight: 600; color: #111827; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.n4-frow-meta { width: 150px; flex: none; font-size: 12px; color: #6b7280; }
+.n4-frow-time { width: 110px; flex: none; font-size: 12px; color: #9ca3af; }
+.n4-frow-actions { display: flex; align-items: center; gap: 4px; flex: none; min-width: 120px; justify-content: flex-end; }
+
+/* ===== 管理员弹窗 ===== */
+.n4-modal-overlay { position: fixed; inset: 0; background: rgba(15, 23, 42, .45); display: flex; align-items: center; justify-content: center; z-index: 100; padding: 16px; }
+.n4-modal { width: 480px; max-width: 94vw; background: #fff; border-radius: 20px; padding: 22px 24px 18px; box-shadow: 0 30px 80px rgba(15, 23, 42, .3); }
+.n4-modal-head { display: flex; align-items: center; justify-content: space-between; font-size: 16px; font-weight: 800; color: #111827; margin-bottom: 14px; }
+.n4-modal-note { font-size: 12.5px; color: #6b7280; line-height: 1.6; margin: 10px 0 0; }
+.n4-modal-note code { background: #f3f4f6; padding: 1px 5px; border-radius: 5px; font-family: 'DM Mono', ui-monospace, monospace; font-size: 11.5px; }
+.n4-modal-input { width: 100%; box-sizing: border-box; height: 42px; border: 1.5px solid #e5e7eb; border-radius: 12px; padding: 0 14px; font-size: 14px; outline: none; margin-top: 6px; }
+.n4-modal-input:focus { border-color: #d92525; }
+.n4-modal-err { color: #d92525; font-size: 12.5px; margin: 8px 0 0; }
+.n4-modal-ok { color: #16a34a; font-size: 12.5px; margin: 8px 0 0; }
+.n4-modal-main { width: 100%; margin-top: 14px; }
+.n4-field { margin-bottom: 14px; }
+.n4-field label { display: block; font-size: 12.5px; font-weight: 700; color: #374151; margin-bottom: 6px; }
+.n4-dirnow { display: flex; align-items: center; gap: 10px; background: #f9fafb; border: 1px solid #f0f0f0; border-radius: 12px; padding: 10px 12px; }
+.n4-dirpath { flex: 1; min-width: 0; font-family: 'DM Mono', ui-monospace, monospace; font-size: 12.5px; color: #111827; word-break: break-all; }
+.n4-dirbadge { flex: none; font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 999px; background: #e5e7eb; color: #4b5563; }
+.n4-dirbadge.custom { background: #fde8e8; color: #d92525; }
+.n4-modal-actions { display: flex; gap: 8px; margin-top: 14px; flex-wrap: wrap; }

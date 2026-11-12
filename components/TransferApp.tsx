@@ -23,6 +23,17 @@ export default function TransferApp() {
   const [showP2P, setShowP2P] = useState(false);
   // 主机文件区当前所在目录（"" = 根目录），文件夹点进逐层导航用
   const [currentDir, setCurrentDir] = useState("");
+  const [filesView, setFilesView] = useState<"grid" | "list">("grid");
+  useEffect(() => {
+    try {
+      const v = localStorage.getItem("wft_files_view");
+      if (v === "list" || v === "grid") setFilesView(v);
+    } catch { /* 忽略 */ }
+  }, []);
+  const changeFilesView = (v: "grid" | "list") => {
+    setFilesView(v);
+    try { localStorage.setItem("wft_files_view", v); } catch { /* 忽略 */ }
+  };
 
   // Upload state
   const [files, setFiles] = useState<FileEntry[]>([]);
@@ -101,6 +112,87 @@ export default function TransferApp() {
   useEffect(() => {
     if (showLog) fetchLogs();
   }, [showLog, fetchLogs]);
+
+  // ── 管理员（独立口令）与中转目录设置 ─────────────────────
+  const [showAdmin, setShowAdmin] = useState(false);
+  const [adminAuthed, setAdminAuthed] = useState<boolean | null>(null);
+  const [adminCodeInput, setAdminCodeInput] = useState("");
+  const [adminError, setAdminError] = useState("");
+  const [adminMsg, setAdminMsg] = useState("");
+  const [adminSettings, setAdminSettings] = useState<{ storageDir: string; configuredDir: string | null; defaultDir: string; isDefault: boolean } | null>(null);
+  const [dirInput, setDirInput] = useState("");
+
+  const loadAdminSettings = useCallback(async () => {
+    try {
+      const res = await fetch("/api/admin/settings");
+      if (res.ok) {
+        const s = await res.json();
+        setAdminAuthed(true);
+        setAdminSettings(s);
+        setDirInput(s.isDefault ? "" : s.storageDir);
+        return;
+      }
+    } catch { /* fall through */ }
+    setAdminAuthed(false);
+  }, []);
+
+  const openAdmin = () => {
+    setShowAdmin(true);
+    setAdminError("");
+    setAdminMsg("");
+    setAdminAuthed(null);
+    void loadAdminSettings();
+  };
+
+  const submitAdminLogin = async () => {
+    setAdminError("");
+    try {
+      const res = await fetch("/api/admin/auth", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code: adminCodeInput.trim() }),
+      });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setAdminError(d.error || "管理员登录失败");
+        return;
+      }
+      setAdminCodeInput("");
+      await loadAdminSettings();
+    } catch {
+      setAdminError("网络错误，请重试");
+    }
+  };
+
+  const saveStorageDir = async (value: string) => {
+    setAdminError("");
+    setAdminMsg("");
+    try {
+      const res = await fetch("/api/admin/settings", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ storageDir: value }),
+      });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setAdminError(d.error || "保存失败");
+        return;
+      }
+      setAdminSettings(d);
+      setDirInput(d.isDefault ? "" : d.storageDir);
+      setAdminMsg(value === "" ? "已恢复默认目录" : "已切换，文件区现在显示新目录的内容");
+      setCurrentDir("");
+      fetchFiles();
+    } catch {
+      setAdminError("网络错误，请重试");
+    }
+  };
+
+  const adminLogout = async () => {
+    try { await fetch("/api/admin/auth", { method: "DELETE" }); } catch { /* 忽略 */ }
+    setAdminAuthed(false);
+    setAdminSettings(null);
+  };
 
   const logBoxRef = useRef<HTMLPreElement | null>(null);
   useEffect(() => {
@@ -934,6 +1026,13 @@ export default function TransferApp() {
           >
             <i className="fa fa-file-text-o"></i><span>日志</span>
           </button>
+          <button
+            className="n4-topbtn"
+            onClick={() => { setShowQr(false); setShowCode(false); setShowLog(false); openAdmin(); }}
+            title="管理员设置"
+          >
+            <i className="fa fa-cog"></i><span>管理</span>
+          </button>
           <span className="n4-hosttag" title={modeLabel}>
             <span className={`w-2 h-2 rounded-full ${serverDot}`}></span>
             {serverLabel}
@@ -987,6 +1086,70 @@ export default function TransferApp() {
           )}
         </div>
       </header>
+
+      {/* ── 管理员弹窗 ── */}
+      {showAdmin && (
+        <div className="n4-modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) setShowAdmin(false); }}>
+          <div className="n4-modal">
+            <div className="n4-modal-head">
+              <span>管理员设置</span>
+              <button className="n4-iconbtn" onClick={() => setShowAdmin(false)} title="关闭">
+                <i className="fa fa-times"></i>
+              </button>
+            </div>
+            {adminAuthed === null ? (
+              <p className="n4-modal-note">加载中…</p>
+            ) : adminAuthed === false ? (
+              <div>
+                <p className="n4-modal-note">
+                  管理员口令与访问口令不同，在主机项目 <code>data/admin-code.txt</code> 里查看（首次打开本弹窗时已自动生成，共 8 位）。
+                </p>
+                <input
+                  className="n4-modal-input"
+                  type="password"
+                  value={adminCodeInput}
+                  onChange={(e) => setAdminCodeInput(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter") submitAdminLogin(); }}
+                  placeholder="管理员口令"
+                  autoFocus
+                />
+                {adminError && <p className="n4-modal-err">{adminError}</p>}
+                <button className="n4-btn-red n4-modal-main" onClick={submitAdminLogin}>进入管理</button>
+              </div>
+            ) : adminSettings ? (
+              <div>
+                <div className="n4-field">
+                  <label>当前服务器中转目录</label>
+                  <div className="n4-dirnow">
+                    <span className="n4-dirpath">{adminSettings.storageDir}</span>
+                    <span className={`n4-dirbadge ${adminSettings.isDefault ? "" : "custom"}`}>{adminSettings.isDefault ? "默认" : "自定义"}</span>
+                  </div>
+                </div>
+                <div className="n4-field">
+                  <label>切换到（绝对路径，目录不存在会自动创建）</label>
+                  <input
+                    className="n4-modal-input"
+                    type="text"
+                    value={dirInput}
+                    onChange={(e) => setDirInput(e.target.value)}
+                    placeholder={adminSettings.defaultDir}
+                  />
+                </div>
+                {adminError && <p className="n4-modal-err">{adminError}</p>}
+                {adminMsg && <p className="n4-modal-ok">{adminMsg}</p>}
+                <div className="n4-modal-actions">
+                  <button className="n4-btn-red" onClick={() => saveStorageDir(dirInput)} disabled={!dirInput.trim()}>保存并切换</button>
+                  {!adminSettings.isDefault && (
+                    <button className="n4-btn-soft" onClick={() => saveStorageDir("")}>恢复默认</button>
+                  )}
+                  <button className="n4-btn-soft" onClick={adminLogout}>退出管理员</button>
+                </div>
+                <p className="n4-modal-note">切换后文件区显示新目录的内容；旧目录里的文件不会自动搬过去，需要的话在主机上手动移动。</p>
+              </div>
+            ) : null}
+          </div>
+        </div>
+      )}
 
       {/* ── 服务器视图 ── */}
       {!showP2P && (
@@ -1103,6 +1266,14 @@ export default function TransferApp() {
               </div>
               <span className="n4-fpanel-meta">
                 {dirFolderCount} 个文件夹 · {dirFileCount} 个文件 · {formatSize(subtreeSize(dirEntries))}
+                <span className="n4-viewseg">
+                  <button className={filesView === "list" ? "on" : ""} onClick={() => changeFilesView("list")} title="列表显示">
+                    <i className="fa fa-list"></i>
+                  </button>
+                  <button className={filesView === "grid" ? "on" : ""} onClick={() => changeFilesView("grid")} title="卡片显示">
+                    <i className="fa fa-th-large"></i>
+                  </button>
+                </span>
                 <button className="n4-iconbtn" onClick={fetchFiles} title="刷新">
                   <i className="fa fa-refresh"></i>
                 </button>
@@ -1121,6 +1292,7 @@ export default function TransferApp() {
                 </button>
               </div>
             ) : (
+              filesView === "grid" ? (
               <div className="n4-fgrid">
                 {activeDir !== "" && (
                   <div className="n4-upcard" onClick={() => setCurrentDir(crumbParts.slice(0, -1).join("/"))}>
@@ -1168,6 +1340,49 @@ export default function TransferApp() {
                   );
                 })}
               </div>
+              ) : (
+              <div className="n4-flist">
+                {activeDir !== "" && (
+                  <div className="n4-frow up" onClick={() => setCurrentDir(crumbParts.slice(0, -1).join("/"))}>
+                    <span className="n4-frow-ico"><i className="fa fa-level-up"></i></span>
+                    <span className="n4-frow-name">返回上一级</span>
+                    <span className="n4-frow-meta"></span>
+                    <span className="n4-frow-time"></span>
+                    <span className="n4-frow-actions"></span>
+                  </div>
+                )}
+                {dirEntries.map((f) => {
+                  const isDownloading = downloadingPath === f.path;
+                  const isFolder = f.type === "folder";
+                  return (
+                    <div
+                      key={f.path}
+                      className={`n4-frow ${isFolder ? "folder" : ""}`}
+                      onClick={isFolder ? () => setCurrentDir(f.path) : undefined}
+                    >
+                      <span className={`n4-frow-ico ${isFolder ? "folder" : ""}`}>
+                        <i className={`fa ${isFolder ? "fa-folder-o" : "fa-file-text-o"}`}></i>
+                      </span>
+                      <span className="n4-frow-name" title={f.path}>{f.name}</span>
+                      <span className="n4-frow-meta">
+                        {isFolder ? `文件夹 · ${countInFolder(f)} 个文件` : formatSize(f.size)}
+                      </span>
+                      <span className="n4-frow-time">{isFolder ? "" : formatTime(f.modified)}</span>
+                      <span className="n4-frow-actions">
+                        {isFolder && <span className="n4-enter-hint">进入 <i className="fa fa-angle-right"></i></span>}
+                        {isFolder && <span className="n4-ziptag">ZIP</span>}
+                        <button className="n4-iconbtn" onClick={(e) => { e.stopPropagation(); if (!isDownloading) handleDownload(f); }} title={isFolder ? "打包下载 (ZIP)" : "下载"}>
+                          <i className={`fa fa-download ${isDownloading ? "fa-spin" : ""}`}></i>
+                        </button>
+                        <button className="n4-iconbtn danger" onClick={(e) => { e.stopPropagation(); handleDelete(f); }} title="删除">
+                          <i className="fa fa-trash-o"></i>
+                        </button>
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+              )
             )}
           </div>
 

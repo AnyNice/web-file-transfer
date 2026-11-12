@@ -1,8 +1,12 @@
 // 服务器模式的文件系统辅助：路径安全、唯一文件名
+// 中转根目录由 lib/settings 决定（管理员可改，默认 <项目>/uploads），每次调用现取。
 import { existsSync } from "fs";
 import { join, resolve, sep } from "path";
+import { getStorageDir } from "@/lib/settings";
 
-export const UPLOAD_DIR = join(process.cwd(), "uploads");
+export function uploadDir(): string {
+  return getStorageDir();
+}
 
 /** 清洗单个路径段：去掉非法字符与路径分隔，拒绝 . 与 .. */
 export function sanitizeSegment(seg: string): string {
@@ -15,7 +19,7 @@ export function sanitizeSegment(seg: string): string {
 
 /**
  * 把用户给的相对路径（可含多级目录）解析为 uploads 内的绝对路径。
- * 任一段为 .. 或解析后逃出 UPLOAD_DIR 时返回 null。
+ * 任一段为 .. 或解析后逃出中转根目录时返回 null。
  */
 export function resolveSafePath(relPath: string): string | null {
   const parts = relPath
@@ -25,8 +29,8 @@ export function resolveSafePath(relPath: string): string | null {
   if (parts.length === 0) return null;
   if (parts.some((p) => p === ".." || p === ".")) return null;
   const safeParts = parts.map(sanitizeSegment);
-  const abs = resolve(join(UPLOAD_DIR, ...safeParts));
-  const root = resolve(UPLOAD_DIR);
+  const root = resolve(getStorageDir());
+  const abs = resolve(join(root, ...safeParts));
   if (abs !== root && !abs.startsWith(root + sep)) return null;
   return abs;
 }

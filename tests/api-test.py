@@ -210,6 +210,42 @@ check("日志含本次登录与建房记录", "[auth]" in joined and "登录成�
 s, h, body = req(opener, "GET", "/api/logs?download=1")
 check("日志可下载", s == 200 and marker.encode() in body, f"{s}")
 
+# 12) 管理员与中转目录切换
+s, _, _ = req(plain, "GET", "/api/admin/settings")
+check("未登录 GET 管理设置 = 401", s == 401, f"got {s}")
+s, _, _ = req(opener, "GET", "/api/admin/settings")
+check("仅普通登录 GET 管理设置 = 403", s == 403, f"got {s}")
+req(opener, "GET", "/api/admin/auth")  # 触发管理员口令文件生成
+admin_code = open(os.path.join(WORK, "data/admin-code.txt"), encoding="utf-8").read().strip()
+check("管理员口令文件已生成(8位)", len(admin_code) == 8 and admin_code.isdigit(), admin_code)
+s, _, _ = req(opener, "POST", "/api/admin/auth", json.dumps({"code": "00000000" if admin_code != "00000000" else "11111111"}).encode(), {"Content-Type": "application/json"})
+check("错误管理员口令 = 401", s == 401, f"got {s}")
+s, _, _ = req(opener, "POST", "/api/admin/auth", json.dumps({"code": admin_code}).encode(), {"Content-Type": "application/json"})
+check("管理员登录 = 200", s == 200, f"got {s}")
+s, _, body = req(opener, "GET", "/api/admin/settings")
+st = json.loads(body) if s == 200 else {}
+check("默认中转目录为 uploads 且 isDefault", s == 200 and st.get("isDefault") is True and st.get("storageDir", "").replace("\\", "/").endswith("/uploads"), f"{s} {st}")
+alt_dir = os.path.join(WORK, ".tmp-alt-storage")
+s, _, body = req(opener, "PUT", "/api/admin/settings", json.dumps({"storageDir": "relative/dir"}).encode(), {"Content-Type": "application/json"})
+check("相对路径设置被拒 = 400", s == 400, f"got {s}")
+s, _, body = req(opener, "PUT", "/api/admin/settings", json.dumps({"storageDir": alt_dir}).encode(), {"Content-Type": "application/json"})
+st = json.loads(body) if s == 200 else {}
+check("切换中转目录 = 200", s == 200 and st.get("isDefault") is False, f"{s} {st}")
+s, _, body = req(opener, "GET", "/api/files")
+check("新目录初始为空", s == 200 and json.loads(body)["files"] == [], f"{s}")
+s, _, resp = multipart_upload("probe.txt", b"alt storage probe")
+check("上传落入新目录", s == 200 and os.path.exists(os.path.join(alt_dir, "probe.txt")), f"{s}")
+s, _, body = req(opener, "GET", "/api/files")
+names = [f["name"] for f in json.loads(body)["files"]] if s == 200 else []
+check("列表显示新目录文件", names == ["probe.txt"], f"{names}")
+s, _, body = req(opener, "PUT", "/api/admin/settings", json.dumps({"storageDir": ""}).encode(), {"Content-Type": "application/json"})
+st = json.loads(body) if s == 200 else {}
+check("恢复默认目录 = 200", s == 200 and st.get("isDefault") is True, f"{s}")
+s, _, body = req(opener, "GET", "/api/files")
+names = [f["name"] for f in json.loads(body)["files"]] if s == 200 else []
+check("恢复后列表回到原目录", "1.txt" in names and "probe.txt" not in names, f"{names}")
+shutil.rmtree(alt_dir, ignore_errors=True)
+
 clean_test_artifacts()
 
 print(f"\n==== {len(passed)} passed, {len(failed)} failed ====")

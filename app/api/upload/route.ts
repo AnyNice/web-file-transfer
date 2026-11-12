@@ -6,7 +6,8 @@ import { Readable } from "stream";
 import { randomBytes } from "crypto";
 import { requireAuth } from "@/lib/auth";
 import { logError, logInfo, logWarn } from "@/lib/log";
-import { UPLOAD_DIR, sanitizeSegment, uniqueFilename } from "@/lib/serverfs";
+import { sanitizeSegment, uniqueFilename } from "@/lib/serverfs";
+import { ensureStorageDir } from "@/lib/settings";
 
 // 流式 multipart 解析上传（2026-11-12 重写）
 // 旧实现是手写字符串拼接解析，不剥离结尾 boundary、把 header 当 UTF-8 文本拼，
@@ -47,7 +48,8 @@ export async function POST(req: NextRequest) {
   const bodyNeedle = Buffer.concat([Buffer.from("\r\n", "utf8"), dashBoundary]);
 
   // 目标相对路径（文件夹上传）：取目录部分，文件名以 multipart 内的为准
-  let targetDir = UPLOAD_DIR;
+  const storageRoot = ensureStorageDir();
+  let targetDir = storageRoot;
   let relDirLabel = "";
   const relPathHeader = req.headers.get("x-file-path");
   if (relPathHeader) {
@@ -59,7 +61,7 @@ export async function POST(req: NextRequest) {
         .filter((s) => s && s !== "." && s !== "..")
         .map(sanitizeSegment);
       if (dirParts.length > 0) {
-        targetDir = join(UPLOAD_DIR, ...dirParts);
+        targetDir = join(storageRoot, ...dirParts);
         relDirLabel = dirParts.join("/");
       }
     } catch { /* 忽略非法头，按根目录处理 */ }
