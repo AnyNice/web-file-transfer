@@ -9,6 +9,7 @@ import {
   recordLoginSuccess,
   sessionToken,
 } from "@/lib/auth";
+import { logInfo, logWarn } from "@/lib/log";
 
 export const dynamic = "force-dynamic";
 
@@ -29,6 +30,7 @@ export async function GET(req: NextRequest) {
 export async function POST(req: NextRequest) {
   const ip = clientIp(req);
   if (loginRateLimited(ip)) {
+    logWarn("auth", `登录尝试过多被限速 ip=${ip}`);
     return NextResponse.json(
       { error: "尝试次数过多，请 5 分钟后再试" },
       { status: 429 }
@@ -41,9 +43,11 @@ export async function POST(req: NextRequest) {
   } catch { /* invalid body */ }
   if (!checkCode(code)) {
     recordLoginFailure(ip);
+    logWarn("auth", `口令错误 ip=${ip}`);
     return NextResponse.json({ error: "口令不正确" }, { status: 401 });
   }
   recordLoginSuccess(ip);
+  logInfo("auth", `登录成功 ip=${ip}`);
   const res = NextResponse.json({ ok: true });
   res.cookies.set(AUTH_COOKIE, sessionToken(), {
     httpOnly: true,

@@ -9,3 +9,4 @@ uploads/
 data/
 p2p-rooms.json
 *.tmp
+logs/

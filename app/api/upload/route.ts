@@ -5,6 +5,7 @@ import { dirname, join } from "path";
 import { Readable } from "stream";
 import { randomBytes } from "crypto";
 import { requireAuth } from "@/lib/auth";
+import { logError, logInfo, logWarn } from "@/lib/log";
 import { UPLOAD_DIR, sanitizeSegment, uniqueFilename } from "@/lib/serverfs";
 
 // 流式 multipart 解析上传（2026-11-12 重写）
@@ -188,20 +189,23 @@ export async function POST(req: NextRequest) {
     await rename(tmpPath, finalPath);
     tmpPath = "";
 
+    const relPath = relDirLabel ? `${relDirLabel}/${finalName}` : finalName;
+    logInfo("upload", `上传完成 ${relPath} ${written}B`);
     return NextResponse.json({
       name: finalName,
-      path: relDirLabel ? `${relDirLabel}/${finalName}` : finalName,
+      path: relPath,
       size: written,
     });
   } catch (err) {
     await cleanup();
     if (err instanceof Error && err.message === "FILE_TOO_LARGE") {
+      logWarn("upload", `文件超过上限 ${MAX_MB}MB 被拒`);
       return NextResponse.json(
         { error: `文件超过上限 ${MAX_MB} MB` },
         { status: 413 }
       );
     }
-    console.error("Upload error:", err);
+    logError("upload", `上传失败 ${err instanceof Error ? err.message : String(err)}`);
     return NextResponse.json({ error: String(err) }, { status: 500 });
   }
 }

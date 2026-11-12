@@ -811,3 +811,10 @@ body {
 .n4-pop-urls button.on { border-color: #d92525; color: #d92525; background: #fff7f7; }
 .n4-pop-code { font-family: 'DM Mono', ui-monospace, monospace; font-size: 34px; font-weight: 600; letter-spacing: .35em; text-indent: .35em; color: #111827; margin: 6px 0 12px; }
 .n4-pop-hint { margin-top: 10px; font-size: 11.5px; color: #9ca3af; line-height: 1.5; }
+
+/* ===== 日志弹层 ===== */
+.n4-pop-log { width: 560px; max-width: 92vw; text-align: left; }
+.n4-pop-log .n4-pop-title { text-align: left; }
+.n4-logbox { margin: 0; max-height: 300px; overflow: auto; background: #0f172a; color: #dbeafe; border-radius: 12px; padding: 12px 14px; font-family: 'DM Mono', ui-monospace, monospace; font-size: 11px; line-height: 1.65; white-space: pre-wrap; word-break: break-all; }
+.n4-log-actions { display: flex; gap: 8px; margin-top: 10px; }
+.n4-log-actions .n4-btn-mini { text-decoration: none; }

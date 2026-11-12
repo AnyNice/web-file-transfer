@@ -3,6 +3,7 @@ import { randomInt } from "crypto";
 import fs from "fs";
 import path from "path";
 import { requireAuth } from "@/lib/auth";
+import { logInfo, logWarn } from "@/lib/log";
 
 // P2P 信令（2026-11-12 重写）
 // 旧实现的问题：host-create 只写内存不落盘（重启即丢）、过期判断用文件整体时间
@@ -18,6 +19,7 @@ interface Room {
   offer: string;
   answer?: string;
   createdAt: number;
+  hostId?: string; // 建房浏览器的 clientId，用于拒绝「连自己的码」
 }
 
 const ROOM_TTL_MS = 10 * 60_000; // 10 分钟，与前端轮询超时一致
@@ -89,7 +91,7 @@ export async function POST(req: NextRequest) {
   if (denied) return denied;
 
   const body = await req.json().catch(() => ({}));
-  const { action, code, sdp } = body as { action?: string; code?: string; sdp?: string };
+  const { action, code, sdp, clientId } = body as { action?: string; code?: string; sdp?: string; clientId?: string };
   const normalized = (code || "").toUpperCase().trim();
   const rooms = loadStore();
   const ip = clientIp(req);
@@ -97,19 +99,26 @@ export async function POST(req: NextRequest) {
   if (action === "host-create") {
     if (!sdp) return NextResponse.json({ error: "缺少 offer" }, { status: 400 });
     const newCode = genCode(rooms);
-    rooms.set(newCode, { code: newCode, offer: sdp, createdAt: Date.now() });
+    rooms.set(newCode, { code: newCode, offer: sdp, createdAt: Date.now(), hostId: clientId || undefined });
     saveStore(rooms);
+    logInfo("p2p", `建房 code=${newCode} ip=${ip}`);
     return NextResponse.json({ code: newCode, ttlMs: ROOM_TTL_MS });
   }
 
   if (action === "guest-join") {
     if (guessLimited(ip)) {
+      logWarn("p2p", `猜码过多被限速 ip=${ip}`);
       return NextResponse.json({ error: "尝试次数过多，请稍后再试" }, { status: 429 });
     }
     const entry = rooms.get(normalized);
     if (!entry) {
       recordGuessFail(ip);
+      logWarn("p2p", `无效邀请码 code=${normalized} ip=${ip}`);
       return NextResponse.json({ error: "邀请码无效或已过期" }, { status: 404 });
+    }
+    if (entry.hostId && clientId && entry.hostId === clientId) {
+      logWarn("p2p", `拒绝自连 code=${normalized} ip=${ip}`);
+      return NextResponse.json({ error: "这是你自己生成的邀请码，不能连接自己" }, { status: 403 });
     }
     return NextResponse.json({ offer: entry.offer });
   }
@@ -130,6 +139,7 @@ export async function POST(req: NextRequest) {
       const ans = entry.answer;
       rooms.delete(normalized);
       saveStore(rooms);
+      logInfo("p2p", `配对成功 code=${normalized}`);
       return NextResponse.json({ joined: true, answer: ans });
     }
     return NextResponse.json({ joined: false, expiresInMs: ROOM_TTL_MS - (Date.now() - entry.createdAt) });

@@ -183,6 +183,33 @@ check("未登录 DELETE = 401", s == 401, f"got {s}")
 s, _, _ = req(opener, "DELETE", "/api/files/tricky.bin")
 check("删除成功且文件消失", s == 200 and not os.path.exists(os.path.join(WORK, "uploads/tricky.bin")), f"got {s}")
 
+# 10) 自连拒绝：同一浏览器(clientId)不能拿自己生成的码连自己
+s, _, resp = req(opener, "POST", "/api/p2p/signaling", json.dumps({"action": "host-create", "sdp": "SELF_OFFER", "clientId": "browser-A"}).encode(), {"Content-Type": "application/json"})
+self_code = json.loads(resp)["code"] if s == 200 else ""
+check("带 clientId 建房成功", s == 200 and len(self_code) == 6, f"{s}")
+s, _, resp = req(opener, "POST", "/api/p2p/signaling", json.dumps({"action": "guest-join", "code": self_code, "clientId": "browser-A"}).encode(), {"Content-Type": "application/json"})
+check("同一浏览器连自己的码 = 403", s == 403 and "自己" in resp.decode("utf-8", "ignore"), f"{s}")
+s, _, resp = req(opener, "POST", "/api/p2p/signaling", json.dumps({"action": "guest-join", "code": self_code, "clientId": "browser-B"}).encode(), {"Content-Type": "application/json"})
+check("其他浏览器连同一码 = 200", s == 200 and json.loads(resp).get("offer") == "SELF_OFFER", f"{s}")
+req(opener, "POST", "/api/p2p/signaling", json.dumps({"action": "host-cancel", "code": self_code}).encode(), {"Content-Type": "application/json"})
+
+# 11) 日志落盘与查看
+s, _, _ = req(plain, "GET", "/api/logs")
+check("未登录 GET /api/logs = 401", s == 401, f"got {s}")
+s, _, _ = req(plain, "POST", "/api/logs", b"{}", {"Content-Type": "application/json"})
+check("未登录 POST /api/logs = 401", s == 401, f"got {s}")
+marker = f"apitest-marker-{random.randint(100000, 999999)}"
+s, _, _ = req(opener, "POST", "/api/logs", json.dumps({"level": "WARN", "tag": "test", "msg": marker}).encode(), {"Content-Type": "application/json"})
+check("前端日志回传 = 200", s == 200, f"got {s}")
+import time as _time; _time.sleep(0.6)  # 落盘是异步 append，稍等
+s, _, body = req(opener, "GET", "/api/logs?tail=1000")
+lines = json.loads(body).get("lines", []) if s == 200 else []
+joined = "\n".join(lines)
+check("日志可查且含回传标记", marker in joined, f"{s} lines={len(lines)}")
+check("日志含本次登录与建房记录", "[auth]" in joined and "登录成功" in joined and "[p2p]" in joined and "建房" in joined)
+s, h, body = req(opener, "GET", "/api/logs?download=1")
+check("日志可下载", s == 200 and marker.encode() in body, f"{s}")
+
 clean_test_artifacts()
 
 print(f"\n==== {len(passed)} passed, {len(failed)} failed ====")

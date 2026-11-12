@@ -149,12 +149,29 @@ export class P2PConnection {
 
   // ── 信令 ─────────────────────────────────────────────────
 
+  // 本浏览器身份（localStorage 持久）：建房时登记到房间，入房时比对，
+  // 防止同一个浏览器拿自己生成的邀请码连自己（服务端只认码不认人时的漏洞）
+  private clientId(): string {
+    try {
+      let id = localStorage.getItem("wft_client_id");
+      if (!id) {
+        id = typeof crypto !== "undefined" && "randomUUID" in crypto
+          ? crypto.randomUUID()
+          : `c-${Date.now()}-${Math.floor(Math.random() * 1e9)}`;
+        localStorage.setItem("wft_client_id", id);
+      }
+      return id;
+    } catch {
+      return "";
+    }
+  }
+
   async createRoom(): Promise<string> {
     const offerSdp = await this.makeOffer();
     const res = await fetch("/api/p2p/signaling", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "host-create", sdp: offerSdp }),
+      body: JSON.stringify({ action: "host-create", sdp: offerSdp, clientId: this.clientId() }),
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data.error || "创建房间失败");
@@ -208,7 +225,7 @@ export class P2PConnection {
     const joinRes = await fetch("/api/p2p/signaling", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "guest-join", code: normalized }),
+      body: JSON.stringify({ action: "guest-join", code: normalized, clientId: this.clientId() }),
     });
     const joinData = await joinRes.json().catch(() => ({}));
     if (!joinRes.ok) throw new Error(joinData.error || "连接失败");

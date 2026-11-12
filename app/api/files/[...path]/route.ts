@@ -4,6 +4,7 @@ import { basename } from "path";
 import { existsSync, createReadStream } from "fs";
 import { Readable } from "stream";
 import { requireAuth } from "@/lib/auth";
+import { logError, logInfo, logWarn } from "@/lib/log";
 import { resolveSafePath } from "@/lib/serverfs";
 import { collectEntries, zipStream } from "@/lib/zipstream";
 
@@ -52,13 +53,17 @@ export async function GET(
   if (denied) return denied;
   const { path: parts } = await params;
   const filePath = resolveFromParams(parts);
-  if (!filePath) return NextResponse.json({ error: "Access denied" }, { status: 403 });
+  if (!filePath) {
+    logWarn("files", `拒绝越界路径 /${parts.join("/")}`);
+    return NextResponse.json({ error: "Access denied" }, { status: 403 });
+  }
   if (!existsSync(filePath)) return NextResponse.json({ error: "File not found" }, { status: 404 });
 
   const s = await stat(filePath);
   if (s.isDirectory()) {
     // 文件夹打包下载：流式 ZIP(ZIP64)，边打边传，不落盘不占内存
     const entries = await collectEntries(filePath);
+    logInfo("files", `打包下载 ${parts.join("/")} 共 ${entries.length} 项`);
     const zipName = `${basename(filePath) || "files"}.zip`;
     const stream = Readable.from(zipStream(entries));
     return new Response(Readable.toWeb(stream) as ReadableStream<Uint8Array>, {
@@ -159,8 +164,10 @@ export async function DELETE(
   if (!existsSync(filePath)) return NextResponse.json({ error: "Not found" }, { status: 404 });
   try {
     await rm(filePath, { recursive: true, force: true });
+    logInfo("files", `删除 ${parts.join("/")}`);
     return NextResponse.json({ success: true });
   } catch (err) {
+    logError("files", `删除失败 ${parts.join("/")} ${err instanceof Error ? err.message : String(err)}`);
     return NextResponse.json({ error: String(err) }, { status: 500 });
   }
 }

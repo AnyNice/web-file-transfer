@@ -83,8 +83,30 @@ export default function TransferApp() {
   const [hostInfo, setHostInfo] = useState<{ accessCode: string; lanUrls: string[] } | null>(null);
   const [showQr, setShowQr] = useState(false);
   const [showCode, setShowCode] = useState(false);
+  const [showLog, setShowLog] = useState(false);
+  const [logLines, setLogLines] = useState<string[]>([]);
   const [qrImg, setQrImg] = useState("");
   const [qrIdx, setQrIdx] = useState(0);
+
+  const fetchLogs = useCallback(async () => {
+    try {
+      const res = await fetch("/api/logs?tail=200");
+      if (res.ok) {
+        const data = await res.json();
+        setLogLines(Array.isArray(data.lines) ? data.lines : []);
+      }
+    } catch { /* 忽略 */ }
+  }, []);
+
+  useEffect(() => {
+    if (showLog) fetchLogs();
+  }, [showLog, fetchLogs]);
+
+  const logBoxRef = useRef<HTMLPreElement | null>(null);
+  useEffect(() => {
+    const el = logBoxRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [logLines, showLog]);
 
   useEffect(() => {
     if (authState !== "ok") return;
@@ -425,7 +447,7 @@ export default function TransferApp() {
       const conn = new P2PConnection();
       p2pRef.current = conn;
 
-      conn.setOnDisconnected(() => { p2pErrorRef.current = "连接已断开"; setP2pError("连接已断开"); p2pStatusRef.current = "idle"; setP2pStatus("idle"); setPeerName(""); });
+      conn.setOnDisconnected(() => { clog("WARN", "p2p", "连接断开"); p2pErrorRef.current = "连接已断开"; setP2pError("连接已断开"); p2pStatusRef.current = "idle"; setP2pStatus("idle"); setPeerName(""); });
       conn.setOnStatus((s) => { if (!p2pErrorRef.current) setP2pStatusText(s); });
       conn.setOnProgress((prog) => {
         transferProgressRef.current = prog; setTransferProgress(prog);
@@ -457,10 +479,12 @@ export default function TransferApp() {
         if (p2pRef.current !== conn) return; // 用户主动断开，静默处理
         if (err && (err.message === "poll-cancelled" || err.message === "closed")) return;
         p2pErrorRef.current = String(err);
+        clog("ERROR", "p2p", `等待配对失败 ${String(err)}`);
         setP2pError(p2pErrorRef.current);
         p2pStatusRef.current = "idle"; setP2pStatus("idle");
       });
     } catch (err) {
+      clog("ERROR", "p2p", `建房/连接失败 ${String(err)}`);
       setP2pError(String(err));
       p2pStatusRef.current = "idle"; setP2pStatus("idle");
     }
@@ -479,7 +503,7 @@ export default function TransferApp() {
 
       const conn = new P2PConnection();
       p2pRef.current = conn;
-      conn.setOnDisconnected(() => { p2pErrorRef.current = "连接已断开"; setP2pError("连接已断开"); p2pStatusRef.current = "idle"; setP2pStatus("idle"); setPeerName(""); });
+      conn.setOnDisconnected(() => { clog("WARN", "p2p", "连接断开"); p2pErrorRef.current = "连接已断开"; setP2pError("连接已断开"); p2pStatusRef.current = "idle"; setP2pStatus("idle"); setPeerName(""); });
       conn.setOnStatus((s) => { if (!p2pErrorRef.current) setP2pStatusText(s); });
       conn.setOnProgress((prog) => {
         transferProgressRef.current = prog; setTransferProgress(prog);
@@ -502,9 +526,19 @@ export default function TransferApp() {
       p2pStatusRef.current = "connected"; setP2pStatus("connected");
       setP2pStatusText("已连接，等待接收文件…");
     } catch (err) {
+      clog("ERROR", "p2p", `加入房间失败 ${String(err)}`);
       setP2pError(String(err));
       p2pStatusRef.current = "idle"; setP2pStatus("idle");
     }
+  };
+
+  // 前端事件回传落盘（P2P/传输侧的问题服务端看不见，靠这个补齐排查链路）
+  const clog = (level: "INFO" | "WARN" | "ERROR", tag: string, msg: string) => {
+    fetch("/api/logs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ level, tag, msg }),
+    }).catch(() => { /* 回传失败静默 */ });
   };
 
   const copyToClipboard = async (text: string) => {
@@ -881,17 +915,24 @@ export default function TransferApp() {
         <div className="n4-top-actions">
           <button
             className="n4-topbtn"
-            onClick={() => { setShowQr((v) => !v); setShowCode(false); }}
+            onClick={() => { setShowQr((v) => !v); setShowCode(false); setShowLog(false); }}
             title="手机扫码打开本页"
           >
             <i className="fa fa-qrcode"></i><span>二维码</span>
           </button>
           <button
             className="n4-topbtn"
-            onClick={() => { setShowCode((v) => !v); setShowQr(false); }}
+            onClick={() => { setShowCode((v) => !v); setShowQr(false); setShowLog(false); }}
             title="查看本机访问口令"
           >
             <i className="fa fa-key"></i><span>口令</span>
+          </button>
+          <button
+            className="n4-topbtn"
+            onClick={() => { setShowLog((v) => !v); setShowQr(false); setShowCode(false); }}
+            title="查看运行日志（排查问题用）"
+          >
+            <i className="fa fa-file-text-o"></i><span>日志</span>
           </button>
           <span className="n4-hosttag" title={modeLabel}>
             <span className={`w-2 h-2 rounded-full ${serverDot}`}></span>
@@ -927,6 +968,21 @@ export default function TransferApp() {
                 <i className="fa fa-copy"></i> 复制口令
               </button>
               <div className="n4-pop-hint">把口令告诉要传文件的人，TA 打开页面输入即可</div>
+            </div>
+          )}
+          {showLog && (
+            <div className="n4-pop n4-pop-log">
+              <div className="n4-pop-title">运行日志（今日 · 最近 {logLines.length} 条）</div>
+              <pre className="n4-logbox" ref={logBoxRef}>{logLines.length ? logLines.join("\n") : "暂无日志"}</pre>
+              <div className="n4-log-actions">
+                <button className="n4-btn-mini" onClick={fetchLogs}>
+                  <i className="fa fa-refresh"></i> 刷新
+                </button>
+                <a className="n4-btn-mini" href="/api/logs?download=1">
+                  <i className="fa fa-download"></i> 下载今日日志
+                </a>
+              </div>
+              <div className="n4-pop-hint">日志同时保存在主机项目 logs/ 目录，按天一个文件，保留 14 天</div>
             </div>
           )}
         </div>
