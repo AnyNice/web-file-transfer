@@ -1,98 +1,180 @@
 import { NextRequest, NextResponse } from "next/server";
-import { mkdir, writeFile, rm, readdir } from "fs/promises";
-import { join } from "path";
-import { existsSync, createWriteStream } from "fs";
+import { createWriteStream, existsSync } from "fs";
+import { mkdir, rename, rm } from "fs/promises";
+import { dirname, join } from "path";
 import { Readable } from "stream";
+import { randomBytes } from "crypto";
+import { requireAuth } from "@/lib/auth";
+import { UPLOAD_DIR, sanitizeSegment, uniqueFilename } from "@/lib/serverfs";
 
-const UPLOAD_DIR = join(process.cwd(), "uploads");
+// 流式 multipart 解析上传（2026-11-12 重写）
+// 旧实现是手写字符串拼接解析，不剥离结尾 boundary、把 header 当 UTF-8 文本拼，
+// 导致每个上传文件尾部多出 boundary 垃圾、二进制跨分片还会损坏。此实现：
+// - 全程 Buffer 状态机，精确按 \r\n--boundary 切分，boundary 跨 TCP 分片也安全；
+// - 文件边收边写临时文件，内存占用与文件大小无关，大文件不爆内存；
+// - 返回的 size 是实际落盘字节数；成功后才 rename 为正式文件，失败清理临时文件；
+// - 支持 X-File-Path 头携带相对路径（文件夹上传保留目录结构）。
 
-export const maxDuration = 600;
+export const dynamic = "force-dynamic";
+export const maxDuration = 3600;
 
-// Get next available filename by adding numeric suffix
-function getUniqueFilename(baseName: string, existingFiles: string[]): string {
-  if (!existingFiles.includes(baseName)) {
-    return baseName;
-  }
-  const dotIndex = baseName.lastIndexOf('.');
-  const namePart = dotIndex > 0 ? baseName.slice(0, dotIndex) : baseName;
-  const extPart = dotIndex > 0 ? baseName.slice(dotIndex) : '';
+const MAX_MB = Number(process.env.MAX_UPLOAD_MB || 0); // 0 = 不限制
+const MAX_BYTES = MAX_MB > 0 ? MAX_MB * 1024 * 1024 : Infinity;
 
-  let counter = 1;
-  while (true) {
-    const candidate = `${namePart}_${counter}${extPart}`;
-    if (!existingFiles.includes(candidate)) {
-      return candidate;
-    }
-    counter++;
-  }
+type PartInfo = { name: string; filename?: string };
+
+function parseDisposition(value: string): PartInfo {
+  const nameMatch = value.match(/name="([^"]*)"/i);
+  const filenameMatch = value.match(/filename="([^"]*)"/i);
+  return {
+    name: nameMatch ? nameMatch[1] : "",
+    filename: filenameMatch ? filenameMatch[1] : undefined,
+  };
 }
 
 export async function POST(req: NextRequest) {
+  const denied = requireAuth(req);
+  if (denied) return denied;
+
+  const contentType = req.headers.get("content-type") || "";
+  const boundaryMatch = contentType.match(/boundary=(?:"([^"]+)"|([^;]+))/i);
+  if (!boundaryMatch) {
+    return NextResponse.json({ error: "Invalid content type" }, { status: 400 });
+  }
+  const boundary = (boundaryMatch[1] || boundaryMatch[2]).trim();
+  const dashBoundary = Buffer.from(`--${boundary}`, "utf8");
+  const bodyNeedle = Buffer.concat([Buffer.from("\r\n", "utf8"), dashBoundary]);
+
+  // 目标相对路径（文件夹上传）：取目录部分，文件名以 multipart 内的为准
+  let targetDir = UPLOAD_DIR;
+  let relDirLabel = "";
+  const relPathHeader = req.headers.get("x-file-path");
+  if (relPathHeader) {
+    try {
+      const decoded = decodeURIComponent(relPathHeader);
+      const dirParts = decoded
+        .split(/[\\/]+/)
+        .slice(0, -1)
+        .filter((s) => s && s !== "." && s !== "..")
+        .map(sanitizeSegment);
+      if (dirParts.length > 0) {
+        targetDir = join(UPLOAD_DIR, ...dirParts);
+        relDirLabel = dirParts.join("/");
+      }
+    } catch { /* 忽略非法头，按根目录处理 */ }
+  }
+
   let fileStream: ReturnType<typeof createWriteStream> | null = null;
-  let partialFileName = "";
+  let tmpPath = "";
+  let finalName = "";
+  let written = 0;
+  let sawFile = false;
+
+  const cleanup = async () => {
+    try { fileStream?.destroy(); } catch { /* ignore */ }
+    if (tmpPath) await rm(tmpPath, { force: true }).catch(() => {});
+  };
 
   try {
-    if (!existsSync(UPLOAD_DIR)) {
-      await mkdir(UPLOAD_DIR, { recursive: true });
-    }
+    if (!existsSync(targetDir)) await mkdir(targetDir, { recursive: true });
+    if (!req.body) return NextResponse.json({ error: "No body" }, { status: 400 });
 
-    const contentType = req.headers.get("content-type") || "";
-    const boundaryMatch = contentType.match(/boundary=(?:"([^"]+)"|([^;]+))/i);
-    if (!boundaryMatch) {
-      return NextResponse.json({ error: "Invalid content type" }, { status: 400 });
-    }
-    const boundary = boundaryMatch[1] || boundaryMatch[2];
+    type State = "preamble" | "headers" | "body" | "done";
+    let state: State = "preamble";
+    let buf: Buffer = Buffer.alloc(0);
+    let currentPart: PartInfo = { name: "" };
+    let isFilePart = false;
 
-    // Get existing files to check for duplicates
-    let existingFiles: string[] = [];
-    try {
-      existingFiles = await readdir(UPLOAD_DIR);
-    } catch {
-      existingFiles = [];
-    }
+    const emitBody = async (data: Buffer) => {
+      if (!isFilePart || data.length === 0) return;
+      written += data.length;
+      if (written > MAX_BYTES) throw new Error("FILE_TOO_LARGE");
+      if (!fileStream!.write(data)) {
+        await new Promise<void>((resolve, reject) => {
+          fileStream!.once("drain", resolve);
+          fileStream!.once("error", reject);
+        });
+      }
+    };
 
-    let parsedFileName = "upload";
-    let foundHeaderEnd = false;
-    let totalWritten = 0;
-    let headerBuffer = "";
+    const beginPart = async (headersText: string) => {
+      const dispLine = headersText
+        .split("\r\n")
+        .find((l) => l.toLowerCase().startsWith("content-disposition:"));
+      currentPart = dispLine
+        ? parseDisposition(dispLine.slice(dispLine.indexOf(":") + 1))
+        : { name: "" };
+      isFilePart = currentPart.name === "file" && typeof currentPart.filename === "string" && currentPart.filename.length > 0;
+      if (isFilePart && !sawFile) {
+        sawFile = true;
+        const rawName = (currentPart.filename || "upload").split(/[\\/]/).pop() || "upload";
+        finalName = uniqueFilename(targetDir, sanitizeSegment(rawName));
+        tmpPath = join(targetDir, `.upload-${Date.now()}-${randomBytes(4).toString("hex")}.tmp`);
+        fileStream = createWriteStream(tmpPath);
+      } else {
+        isFilePart = false; // 只接受第一个 file 部分，其余丢弃
+      }
+    };
 
     const nodeStream = Readable.fromWeb(req.body as any);
-
     for await (const chunk of nodeStream) {
-      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      const piece: Buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array);
+      buf = buf.length === 0 ? piece : Buffer.concat([buf, piece]);
 
-      if (!foundHeaderEnd) {
-        headerBuffer += buf.toString("utf-8");
-
-        const filenameMatch = headerBuffer.match(/filename="([^"]+)"/i);
-        if (filenameMatch) {
-          parsedFileName = filenameMatch[1];
-        }
-
-        const headerEndIndex = headerBuffer.indexOf("\r\n\r\n");
-        if (headerEndIndex !== -1) {
-          foundHeaderEnd = true;
-          partialFileName = parsedFileName.replace(/[\/\\:*?"<>|]/g, "_");
-
-          // Check for duplicate and rename if needed
-          partialFileName = getUniqueFilename(partialFileName, existingFiles);
-
-          fileStream = createWriteStream(join(UPLOAD_DIR, partialFileName));
-
-          const dataAfterHeaders = buf.slice(headerEndIndex + 4);
-          if (dataAfterHeaders.length > 0) {
-            fileStream.write(dataAfterHeaders);
-            totalWritten += dataAfterHeaders.length;
+      // 尽可能消费 buffer，直到需要更多数据
+      for (;;) {
+        if (state === "preamble") {
+          const idx = buf.indexOf(dashBoundary);
+          if (idx === -1) {
+            // 保留可能是分片边界的尾巴
+            const keep = dashBoundary.length - 1;
+            if (buf.length > keep) buf = buf.subarray(buf.length - keep);
+            break;
           }
-          continue;
+          if (buf.length < idx + dashBoundary.length + 2) break; // 等后续字节判断 -- 或 \r\n
+          const after = buf.subarray(idx + dashBoundary.length, idx + dashBoundary.length + 2).toString("latin1");
+          buf = buf.subarray(idx + dashBoundary.length + 2);
+          state = after === "--" ? "done" : "headers";
+          if (state === "done") break;
+        } else if (state === "headers") {
+          const idx = buf.indexOf("\r\n\r\n");
+          if (idx === -1) {
+            if (buf.length > 64 * 1024) throw new Error("Part headers too large");
+            break;
+          }
+          const headersText = buf.subarray(0, idx).toString("utf8");
+          buf = buf.subarray(idx + 4);
+          await beginPart(headersText);
+          state = "body";
+        } else if (state === "body") {
+          const idx = buf.indexOf(bodyNeedle);
+          if (idx === -1) {
+            const keep = bodyNeedle.length - 1;
+            if (buf.length > keep) {
+              const data = buf.subarray(0, buf.length - keep);
+              buf = buf.subarray(buf.length - keep);
+              await emitBody(Buffer.from(data));
+            }
+            break;
+          }
+          if (idx > 0) await emitBody(Buffer.from(buf.subarray(0, idx)));
+          if (buf.length < idx + bodyNeedle.length + 2) {
+            buf = buf.subarray(idx); // 等后续字节判断 -- 或 \r\n
+            break;
+          }
+          const after = buf.subarray(idx + bodyNeedle.length, idx + bodyNeedle.length + 2).toString("latin1");
+          buf = buf.subarray(idx + bodyNeedle.length + 2);
+          state = after === "--" ? "done" : "headers";
+          if (state === "done") break;
+        } else {
+          break;
         }
-      } else if (fileStream) {
-        fileStream.write(buf);
-        totalWritten += buf.length;
       }
+      if (state === "done") break;
     }
 
-    if (!foundHeaderEnd || !fileStream) {
+    if (!sawFile || !fileStream) {
+      await cleanup();
       return NextResponse.json({ error: "No file data found" }, { status: 400 });
     }
 
@@ -102,48 +184,24 @@ export async function POST(req: NextRequest) {
       fileStream!.end();
     });
 
-    return NextResponse.json({ name: partialFileName, size: totalWritten });
+    const finalPath = join(targetDir, finalName);
+    await rename(tmpPath, finalPath);
+    tmpPath = "";
+
+    return NextResponse.json({
+      name: finalName,
+      path: relDirLabel ? `${relDirLabel}/${finalName}` : finalName,
+      size: written,
+    });
   } catch (err) {
+    await cleanup();
+    if (err instanceof Error && err.message === "FILE_TOO_LARGE") {
+      return NextResponse.json(
+        { error: `文件超过上限 ${MAX_MB} MB` },
+        { status: 413 }
+      );
+    }
     console.error("Upload error:", err);
-    if (fileStream) {
-      fileStream.destroy();
-    }
-    // Clean up partial file only if it doesn't exist in the final listing
-    if (partialFileName) {
-      try {
-        // Check if file was actually saved (not just a partial)
-        const afterFiles = await readdir(UPLOAD_DIR).catch(() => []);
-        // If the file exists and matches the partial name, it might be complete
-        // Only delete if it's clearly a partial (we can't know for sure, so we delete)
-        await rm(join(UPLOAD_DIR, partialFileName), { force: true });
-      } catch {
-        // ignore cleanup errors
-      }
-    }
-    return NextResponse.json({ error: String(err) }, { status: 500 });
-  }
-}
-
-export async function DELETE(req: NextRequest) {
-  try {
-    const { searchParams } = new URL(req.url);
-    const filename = searchParams.get("filename");
-    if (!filename) {
-      return NextResponse.json({ error: "Filename required" }, { status: 400 });
-    }
-    const sanitizedName = filename.replace(/[\/\\:*?"<>|]/g, "_");
-    const filePath = join(UPLOAD_DIR, sanitizedName);
-
-    if (!filePath.startsWith(UPLOAD_DIR)) {
-      return NextResponse.json({ error: "Access denied" }, { status: 403 });
-    }
-
-    if (existsSync(filePath)) {
-      await rm(filePath, { force: true });
-    }
-    return NextResponse.json({ success: true });
-  } catch (err) {
-    console.error("Delete error:", err);
     return NextResponse.json({ error: String(err) }, { status: 500 });
   }
 }
