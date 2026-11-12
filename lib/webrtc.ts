@@ -61,8 +61,13 @@ const ACK_EVERY_BYTES = 1 * 1024 * 1024;
 const SEND_WINDOW_BYTES = 4 * 1024 * 1024;
 const POLL_TIMEOUT_MS = 10 * 60_000; // 与服务端房间 TTL 一致
 
+// STUN：Google 的在国内常年不可达，缺 srflx 候选时部分网络下 ICE 会
+// 连不通（信令成功但通道始终 connecting）。故国内可达的放前面。
 const STUN = {
   iceServers: [
+    { urls: "stun:stun.miwifi.com:3478" },
+    { urls: "stun:stun.qq.com:3478" },
+    { urls: "stun:stun.cloudflare.com:3478" },
     { urls: "stun:stun.l.google.com:19302" },
     { urls: "stun:stun1.l.google.com:19302" },
   ],
