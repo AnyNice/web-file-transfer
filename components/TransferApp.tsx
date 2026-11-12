@@ -575,9 +575,7 @@ export default function TransferApp() {
         setP2pSpeed(active ? active.speed : 0);
         maybeFinishReceiving();
       });
-      conn.setOnFileReady((f) => {
-        setReceivedFiles((prev) => [...prev.filter((x) => x.index !== f.index), f]);
-      });
+      conn.setOnFileReady(handleFileReady);
       conn.setOnAllDone(() => { allDoneSignalRef.current = true; maybeFinishReceiving(); });
 
       transferProgressRef.current = []; setTransferProgress([]);
@@ -631,9 +629,7 @@ export default function TransferApp() {
         setP2pSpeed(active ? active.speed : 0);
         maybeFinishReceiving();
       });
-      conn.setOnFileReady((f) => {
-        setReceivedFiles((prev) => [...prev.filter((x) => x.index !== f.index), f]);
-      });
+      conn.setOnFileReady(handleFileReady);
       conn.setOnFileList((list) => {
         setPeerName(list.length > 0 ? `${list.length} 个文件` : "");
       });
@@ -775,46 +771,14 @@ export default function TransferApp() {
   const removeLocalFile = (index: number) => {
     setLocalFiles((prev) => prev.filter((_, i) => i !== index));
   };
-  const downloadReceivedFiles = async () => {
-    // v2：文件已流式落在 OPFS 里，这里只是把数据搬到用户磁盘，不再把 Blob 拼回内存
-    // 带相对路径（文件夹发送）且浏览器支持时：让用户选一个目标文件夹，按原目录结构流式写盘
-    const win = window as any;
-    const hasPaths = receivedFiles.some((f) => f.name.includes("/"));
-    if (hasPaths && win.showDirectoryPicker && window.isSecureContext) {
-      let root: any = null;
-      try {
-        root = await win.showDirectoryPicker();
-      } catch {
-        return; // 用户取消选择，文件仍保留在待下载列表
-      }
-      for (const f of receivedFiles) {
-        try {
-          const parts = f.name.split("/").filter(Boolean);
-          let dir = root;
-          for (const seg of parts.slice(0, -1)) {
-            dir = await dir.getDirectoryHandle(seg, { create: true });
-          }
-          const fh = await dir.getFileHandle(parts[parts.length - 1], { create: true });
-          const writable = await fh.createWritable();
-          const resp = await fetch(f.url);
-          if (resp.body) {
-            await resp.body.pipeTo(writable);
-          } else {
-            await writable.write(await resp.blob());
-            await writable.close();
-          }
-          const cleanup = f.cleanup;
-          setTimeout(() => { cleanup().catch(() => {}); }, 5000);
-        } catch (err) {
-          console.error("保存接收文件失败:", f.name, err);
-        }
-      }
-      setReceivedFiles([]);
-      return;
-    }
-    // 兜底：逐个触发浏览器下载；相对路径拍平为文件名，同名自动加 _1、_2 后缀防覆盖
-    const used = new Map<string, number>();
-    for (const f of receivedFiles) {
+  // P2P 保存一律走浏览器原生下载（落到浏览器下载目录/下载管理器）：
+  // 不用文件/目录选择器——iOS Safari 根本没有 showSaveFilePicker/showDirectoryPicker，
+  // 原生下载在所有浏览器上行为一致。OPFS 只是接收暂存，不再是最终落点。
+  const recvSaveNamesRef = useRef(new Map<string, number>());
+  const saveReceivedViaBrowser = (files: ReceivedFile[]) => {
+    const used = recvSaveNamesRef.current;
+    for (const f of files) {
+      // 文件夹发送带相对路径：拍平为文件名，同名自动加 _1、_2 后缀防互相覆盖
       const base = f.name.split("/").filter(Boolean).pop() || "file";
       const n = used.get(base) || 0;
       used.set(base, n + 1);
@@ -829,6 +793,17 @@ export default function TransferApp() {
       document.body.appendChild(a);
       a.click();
       a.remove();
+    }
+  };
+  const handleFileReady = (f: ReceivedFile) => {
+    setReceivedFiles((prev) => [...prev.filter((x) => x.index !== f.index), f]);
+    // 接收完成即自动经浏览器下载保存；浏览器若拦截了自动下载，列表里可手动补下
+    try { saveReceivedViaBrowser([f]); } catch { /* 保留列表手动下载 */ }
+  };
+
+  const downloadReceivedFiles = async () => {
+    saveReceivedViaBrowser(receivedFiles);
+    for (const f of receivedFiles) {
       const cleanup = f.cleanup;
       setTimeout(() => { cleanup().catch(() => {}); }, 60000);
     }
@@ -1786,7 +1761,7 @@ export default function TransferApp() {
                     ))}
                     {p2pAllDone && p2pSide === "guest" && (
                       <div className="n4-pane-dl">
-                        <span className="n4-progress-note"><i className="fa fa-download"></i>所有文件已接收，可保存到本地</span>
+                        <span className="n4-progress-note"><i className="fa fa-download"></i>已自动保存到浏览器下载；没弹出的点右侧补下</span>
                         <button className="n4-btn-red" onClick={downloadReceivedFiles}>
                           <i className="fa fa-download"></i>下载全部文件
                         </button>
