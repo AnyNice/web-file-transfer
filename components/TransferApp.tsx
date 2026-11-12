@@ -23,17 +23,27 @@ export default function TransferApp() {
   const [showP2P, setShowP2P] = useState(false);
   // 主机文件区当前所在目录（"" = 根目录），文件夹点进逐层导航用
   const [currentDir, setCurrentDir] = useState("");
-  const [filesView, setFilesView] = useState<"grid" | "list">("grid");
+  const [filesView, setFilesView] = useState<"grid" | "list">("list");
   useEffect(() => {
     try {
-      const v = localStorage.getItem("wft_files_view");
+      const v = localStorage.getItem("wft_files_view_v2");
       if (v === "list" || v === "grid") setFilesView(v);
     } catch { /* 忽略 */ }
   }, []);
   const changeFilesView = (v: "grid" | "list") => {
     setFilesView(v);
-    try { localStorage.setItem("wft_files_view", v); } catch { /* 忽略 */ }
+    try { localStorage.setItem("wft_files_view_v2", v); } catch { /* 忽略 */ }
   };
+
+  // ── 多选（当前目录内） ─────────────────────────────
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  useEffect(() => { setSelected(new Set()); }, [currentDir]);
+  const toggleSelect = (path: string) =>
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(path)) next.delete(path); else next.add(path);
+      return next;
+    });
 
   // Upload state
   const [files, setFiles] = useState<FileEntry[]>([]);
@@ -220,6 +230,14 @@ export default function TransferApp() {
 
   // Downloading file state
   const [downloadingPath, setDownloadingPath] = useState<string | null>(null);
+  const [downloadName, setDownloadName] = useState("");
+  const [downloadNotice, setDownloadNotice] = useState<{ name: string; kind: "done" | "started" | "error" } | null>(null);
+  const noticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const showDownloadNotice = (name: string, kind: "done" | "started" | "error") => {
+    setDownloadNotice({ name, kind });
+    if (noticeTimerRef.current) clearTimeout(noticeTimerRef.current);
+    noticeTimerRef.current = setTimeout(() => setDownloadNotice(null), kind === "error" ? 6000 : 3500);
+  };
   const [downloadProgress, setDownloadProgress] = useState(0);
   const [downloadSpeed, setDownloadSpeed] = useState(0);
   const [downloadBytes, setDownloadBytes] = useState(0);
@@ -338,6 +356,16 @@ export default function TransferApp() {
     } catch { /* ignore */ }
   };
 
+  useEffect(() => {
+    setSelected((prev) => {
+      if (prev.size === 0) return prev;
+      const valid = new Set<string>();
+      const walkAll = (es: FileEntry[]) => es.forEach((e) => { valid.add(e.path); if (e.children) walkAll(e.children); });
+      walkAll(files);
+      const next = new Set([...prev].filter((p) => valid.has(p)));
+      return next.size === prev.size ? prev : next;
+    });
+  }, [files]);
   useEffect(() => {
     fetchFiles();
     return () => {
@@ -539,7 +567,7 @@ export default function TransferApp() {
       const conn = new P2PConnection();
       p2pRef.current = conn;
 
-      conn.setOnDisconnected(() => { clog("WARN", "p2p", "连接断开"); p2pErrorRef.current = "连接已断开"; setP2pError("连接已断开"); p2pStatusRef.current = "idle"; setP2pStatus("idle"); setPeerName(""); });
+      conn.setOnDisconnected((detail) => { clog("WARN", "p2p", `连接断开 ${detail}`); p2pErrorRef.current = "连接已断开"; setP2pError("连接已断开"); p2pStatusRef.current = "idle"; setP2pStatus("idle"); setPeerName(""); });
       conn.setOnStatus((s) => { if (!p2pErrorRef.current) setP2pStatusText(s); });
       conn.setOnProgress((prog) => {
         transferProgressRef.current = prog; setTransferProgress(prog);
@@ -595,7 +623,7 @@ export default function TransferApp() {
 
       const conn = new P2PConnection();
       p2pRef.current = conn;
-      conn.setOnDisconnected(() => { clog("WARN", "p2p", "连接断开"); p2pErrorRef.current = "连接已断开"; setP2pError("连接已断开"); p2pStatusRef.current = "idle"; setP2pStatus("idle"); setPeerName(""); });
+      conn.setOnDisconnected((detail) => { clog("WARN", "p2p", `连接断开 ${detail}`); p2pErrorRef.current = "连接已断开"; setP2pError("连接已断开"); p2pStatusRef.current = "idle"; setP2pStatus("idle"); setPeerName(""); });
       conn.setOnStatus((s) => { if (!p2pErrorRef.current) setP2pStatusText(s); });
       conn.setOnProgress((prog) => {
         transferProgressRef.current = prog; setTransferProgress(prog);
@@ -811,12 +839,9 @@ export default function TransferApp() {
   // 大文件下载重写：旧版用 XHR 把整个文件以 Blob 拉进内存再转存，几个 GB 必卡死。
   // 新版优先 File System Access 流式写盘（带真实进度），否则用浏览器原生下载
   // （浏览器自己流式落盘，同样不进页面内存），服务端已支持 Range。
-  const handleDownload = async (file: FileEntry) => {
-    const url = `/api/files/${file.path.split("/").map(encodeURIComponent).join("/")}`;
-    // 文件夹走服务端流式打包，保存名为 <文件夹>.zip；打包总量未知，进度按已下载字节显示
-    const isFolder = file.type === "folder";
-    const saveName = isFolder ? `${file.name}.zip` : file.name;
-    const total = isFolder ? 0 : file.size;
+  // 通用下载：优先文件选择器流式落盘（带进度），否则原生下载兜底。
+  // 两种路径都在页面上给反馈：进度浮窗 + 完成 / 已开始 / 失败提示。
+  const downloadWithFeedback = async (url: string, saveName: string, total: number, key: string) => {
     const win = window as any;
     if (win.showSaveFilePicker && window.isSecureContext) {
       let handle: any = null;
@@ -827,48 +852,97 @@ export default function TransferApp() {
         handle = null; // 选择器异常则落到下方原生下载兜底，不能点了没反应
       }
       if (handle) {
-      const abort = new AbortController();
-      downloadAbortRef.current = abort;
-      setDownloadingPath(file.path);
-      setDownloadProgress(0);
-      setDownloadSpeed(0);
-      setDownloadBytes(0);
-      downloadStartRef.current = Date.now();
-      try {
-        const res = await fetch(url, { signal: abort.signal });
-        if (res.status === 401) { setAuthState("needed"); throw new Error("登录已失效"); }
-        if (!res.ok || !res.body) throw new Error(`Download failed: ${res.status}`);
-        const writable = await handle.createWritable();
-        const reader = res.body.getReader();
-        let loaded = 0;
-        for (;;) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          await writable.write(value);
-          loaded += value.byteLength;
-          setDownloadBytes(loaded);
-          const elapsed = (Date.now() - downloadStartRef.current) / 1000;
-          if (elapsed > 0) setDownloadSpeed(loaded / elapsed);
-          if (total > 0) setDownloadProgress(Math.round((loaded / total) * 100));
+        const abort = new AbortController();
+        downloadAbortRef.current = abort;
+        setDownloadingPath(key);
+        setDownloadName(saveName);
+        setDownloadProgress(0);
+        setDownloadSpeed(0);
+        setDownloadBytes(0);
+        downloadStartRef.current = Date.now();
+        let ok = false;
+        try {
+          const res = await fetch(url, { signal: abort.signal });
+          if (res.status === 401) { setAuthState("needed"); throw new Error("登录已失效"); }
+          if (!res.ok || !res.body) throw new Error(`Download failed: ${res.status}`);
+          const writable = await handle.createWritable();
+          const reader = res.body.getReader();
+          let loaded = 0;
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            await writable.write(value);
+            loaded += value.byteLength;
+            setDownloadBytes(loaded);
+            const elapsed = (Date.now() - downloadStartRef.current) / 1000;
+            if (elapsed > 0) setDownloadSpeed(loaded / elapsed);
+            if (total > 0) setDownloadProgress(Math.round((loaded / total) * 100));
+          }
+          await writable.close();
+          if (total > 0) setDownloadProgress(100);
+          ok = true;
+        } catch (err: any) {
+          if (err?.name !== "AbortError") {
+            console.error("Download error:", err);
+            showDownloadNotice(saveName, "error");
+          }
+        } finally {
+          downloadAbortRef.current = null;
+          setTimeout(() => { setDownloadingPath(null); setDownloadProgress(0); setDownloadSpeed(0); setDownloadBytes(0); }, 600);
         }
-        await writable.close();
-        if (total > 0) setDownloadProgress(100);
-      } catch (err: any) {
-        if (err?.name !== "AbortError") console.error("Download error:", err);
-      } finally {
-        downloadAbortRef.current = null;
-        setTimeout(() => { setDownloadingPath(null); setDownloadProgress(0); setDownloadSpeed(0); setDownloadBytes(0); }, 600);
-      }
-      return;
+        if (ok) showDownloadNotice(saveName, "done");
+        return;
       }
     }
-    // 原生下载兜底：浏览器流式落盘，不占用页面内存
+    // 原生下载兜底：浏览器流式落盘，不占用页面内存；页面给出「已开始下载」反馈
     const a = document.createElement("a");
     a.href = url;
     a.download = saveName;
     document.body.appendChild(a);
     a.click();
     a.remove();
+    setDownloadingPath(key);
+    setDownloadName(saveName);
+    setDownloadProgress(0);
+    setDownloadSpeed(0);
+    setDownloadBytes(0);
+    showDownloadNotice(saveName, "started");
+    setTimeout(() => { setDownloadingPath(null); }, 2500);
+  };
+
+  const handleDownload = (file: FileEntry) => {
+    const url = `/api/files/${file.path.split("/").map(encodeURIComponent).join("/")}`;
+    // 文件夹走服务端流式打包，保存名为 <文件夹>.zip；打包总量未知，进度按已下载字节显示
+    const isFolder = file.type === "folder";
+    const saveName = isFolder ? `${file.name}.zip` : file.name;
+    const total = isFolder ? 0 : file.size;
+    void downloadWithFeedback(url, saveName, total, file.path);
+  };
+
+  // 批量打包下载（多选 → 一个 ZIP）
+  const handleBatchDownload = () => {
+    const paths = dirEntries.filter((e) => selected.has(e.path)).map((e) => e.path);
+    if (paths.length === 0) return;
+    const qs = paths.map((p) => `p=${encodeURIComponent(p)}`).join("&");
+    void downloadWithFeedback(`/api/files/batch-download?${qs}`, `批量下载-${paths.length}项.zip`, 0, "__batch__");
+  };
+
+  // 批量删除（逐个调已有删除接口，统一确认一次）
+  const handleBulkDelete = async () => {
+    const items = dirEntries.filter((e) => selected.has(e.path));
+    if (items.length === 0) return;
+    if (!window.confirm(`确定删除选中的 ${items.length} 项？${items.some((i) => i.type === "folder") ? "（文件夹将连同内容一起删除）" : ""}`)) return;
+    let failed = 0;
+    for (const f of items) {
+      try {
+        const res = await fetch(`/api/files/${f.path.split("/").map(encodeURIComponent).join("/")}`, { method: "DELETE" });
+        if (res.status === 401) { setAuthState("needed"); return; }
+        if (!res.ok) failed++;
+      } catch { failed++; }
+    }
+    setSelected(new Set());
+    fetchFiles();
+    if (failed > 0) window.alert(`${failed} 项删除失败，请重试或查看日志`);
   };
 
   // ── Badge content ───────────────────────────────────────
@@ -941,6 +1015,8 @@ export default function TransferApp() {
   const subtreeSize = (list: FileEntry[]): number =>
     list.reduce((s, e) => s + (e.type === "file" ? e.size || 0 : e.children ? subtreeSize(e.children) : 0), 0);
   const dirFolderCount = dirEntries.filter((e) => e.type === "folder").length;
+  const allSelected = dirEntries.length > 0 && dirEntries.every((e) => selected.has(e.path));
+  const someSelected = dirEntries.some((e) => selected.has(e.path));
   const dirFileCount = dirEntries.filter((e) => e.type === "file").length;
 
   // ── 访问口令门（N4 风格）────────────────────────────
@@ -978,7 +1054,7 @@ export default function TransferApp() {
   const countInFolder = (e: FileEntry): number =>
     e.children ? e.children.reduce((s, c) => s + (c.type === "file" ? 1 : countInFolder(c)), 0) : 0;
 
-  const toastVisible = !showP2P && (uploadStatus === "uploading" || !!downloadingPath);
+  const toastVisible = !showP2P && (uploadStatus === "uploading" || !!downloadingPath || !!downloadNotice);
 
   return (
     <div className="n4-page">
@@ -1279,6 +1355,36 @@ export default function TransferApp() {
                 </button>
               </span>
             </div>
+            {files.length > 0 && (
+              <div className="n4-selbar">
+                <label className="n4-selall">
+                  <input
+                    type="checkbox"
+                    checked={allSelected}
+                    ref={(el) => { if (el) el.indeterminate = someSelected && !allSelected; }}
+                    onChange={(e) => {
+                      if (e.target.checked) setSelected(new Set(dirEntries.map((x) => x.path)));
+                      else setSelected(new Set());
+                    }}
+                  />
+                  全选
+                </label>
+                {selected.size > 0 ? (
+                  <>
+                    <span className="n4-selcount">已选 {selected.size} 项</span>
+                    <button className="n4-mini-btn" onClick={handleBatchDownload}>
+                      <i className="fa fa-download"></i>打包下载
+                    </button>
+                    <button className="n4-mini-btn danger" onClick={handleBulkDelete}>
+                      <i className="fa fa-trash-o"></i>删除
+                    </button>
+                    <button className="n4-mini-btn" onClick={() => setSelected(new Set())}>取消选择</button>
+                  </>
+                ) : (
+                  <span className="n4-selhint">勾选可批量下载 / 删除</span>
+                )}
+              </div>
+            )}
             {files.length === 0 ? (
               <div className="n4-fpanel-empty">
                 <p>暂无文件</p>
@@ -1293,7 +1399,7 @@ export default function TransferApp() {
               </div>
             ) : (
               filesView === "grid" ? (
-              <div className="n4-fgrid">
+              <div className={`n4-fgrid ${selected.size > 0 ? "has-sel" : ""}`}>
                 {activeDir !== "" && (
                   <div className="n4-upcard" onClick={() => setCurrentDir(crumbParts.slice(0, -1).join("/"))}>
                     <i className="fa fa-level-up"></i>
@@ -1306,9 +1412,16 @@ export default function TransferApp() {
                   return (
                     <div
                       key={f.path}
-                      className={`n4-fcard ${isFolder ? "folder" : ""}`}
+                      className={`n4-fcard ${isFolder ? "folder" : ""} ${selected.has(f.path) ? "sel" : ""}`}
                       onClick={isFolder ? () => setCurrentDir(f.path) : undefined}
                     >
+                      <button
+                        className={`n4-check ${selected.has(f.path) ? "on" : ""}`}
+                        onClick={(e) => { e.stopPropagation(); toggleSelect(f.path); }}
+                        title="选择"
+                      >
+                        {selected.has(f.path) && <i className="fa fa-check"></i>}
+                      </button>
                       <div className={`n4-fico ${isFolder ? "folder" : ""} ${isDownloading ? "busy" : ""}`}>
                         <i className={`fa ${isFolder ? "fa-folder-o" : "fa-file-text-o"}`}></i>
                       </div>
@@ -1323,7 +1436,7 @@ export default function TransferApp() {
                           <div className="n4-bar">
                             <div style={{ width: downloadProgress > 0 ? `${downloadProgress}%` : "35%" }} className={downloadProgress > 0 ? "" : "indet"}></div>
                           </div>
-                          <span>{downloadProgress > 0 ? `${downloadProgress.toFixed(0)}%` : formatSize(downloadBytes)} · {formatSpeed(downloadSpeed)}/s</span>
+                          <span>{downloadProgress > 0 ? `${downloadProgress.toFixed(0)}%` : formatSize(downloadBytes)} · {formatSpeed(downloadSpeed)}</span>
                         </div>
                       )}
                       <div className="n4-factions">
@@ -1341,7 +1454,7 @@ export default function TransferApp() {
                 })}
               </div>
               ) : (
-              <div className="n4-flist">
+              <div className={`n4-flist ${selected.size > 0 ? "has-sel" : ""}`}>
                 {activeDir !== "" && (
                   <div className="n4-frow up" onClick={() => setCurrentDir(crumbParts.slice(0, -1).join("/"))}>
                     <span className="n4-frow-ico"><i className="fa fa-level-up"></i></span>
@@ -1357,9 +1470,12 @@ export default function TransferApp() {
                   return (
                     <div
                       key={f.path}
-                      className={`n4-frow ${isFolder ? "folder" : ""}`}
+                      className={`n4-frow ${isFolder ? "folder" : ""} ${selected.has(f.path) ? "sel" : ""}`}
                       onClick={isFolder ? () => setCurrentDir(f.path) : undefined}
                     >
+                      <span className="n4-rowcheck" onClick={(e) => e.stopPropagation()}>
+                        <input type="checkbox" checked={selected.has(f.path)} onChange={() => toggleSelect(f.path)} />
+                      </span>
                       <span className={`n4-frow-ico ${isFolder ? "folder" : ""}`}>
                         <i className={`fa ${isFolder ? "fa-folder-o" : "fa-file-text-o"}`}></i>
                       </span>
@@ -1378,6 +1494,14 @@ export default function TransferApp() {
                           <i className="fa fa-trash-o"></i>
                         </button>
                       </span>
+                      {isDownloading && (
+                        <div className="n4-fprog row">
+                          <div className="n4-bar">
+                            <div style={{ width: downloadProgress > 0 ? `${downloadProgress}%` : "35%" }} className={downloadProgress > 0 ? "" : "indet"}></div>
+                          </div>
+                          <span>{downloadProgress > 0 ? `${downloadProgress.toFixed(0)}%` : formatSize(downloadBytes)} · {formatSpeed(downloadSpeed)}</span>
+                        </div>
+                      )}
                     </div>
                   );
                 })}
@@ -1390,7 +1514,7 @@ export default function TransferApp() {
           {toastVisible && (
             <div className="n4-toast">
               <div className="n4-toast-head">
-                <span>正在传输</span>
+                <span>{uploadStatus === "uploading" || downloadingPath ? "正在传输" : "下载提示"}</span>
                 <span className="n4-toast-hint">
                   {[uploadStatus === "uploading" ? 1 : 0, downloadingPath ? 1 : 0].reduce((a, b) => a + b, 0)} 进行中
                 </span>
@@ -1404,7 +1528,7 @@ export default function TransferApp() {
                         <span className="n4-toast-idx">({currentUploadIndex + 1}/{pendingUploadQueue.length + currentUploadIndex + 1})</span>
                       )}
                     </span>
-                    <span className="n4-toast-stat">{uploadProgress.toFixed(0)}% · {formatSpeed(uploadSpeed)}/s</span>
+                    <span className="n4-toast-stat">{uploadProgress.toFixed(0)}% · {formatSpeed(uploadSpeed)}</span>
                   </div>
                   <div className="n4-bar">
                     <div style={{ width: `${Math.min(uploadProgress, 100)}%` }}></div>
@@ -1417,13 +1541,29 @@ export default function TransferApp() {
               {downloadingPath && (
                 <div className="n4-toast-item">
                   <div className="n4-toast-row">
-                    <span className="n4-toast-name" title={downloadingPath}>{downloadingPath.split("/").pop()}</span>
+                    <span className="n4-toast-name" title={downloadName || downloadingPath}>{downloadName || downloadingPath.split("/").pop()}</span>
                     <span className="n4-toast-stat">
-                      {downloadProgress > 0 ? `${downloadProgress.toFixed(0)}%` : formatSize(downloadBytes)} · {formatSpeed(downloadSpeed)}/s
+                      {downloadProgress > 0 ? `${downloadProgress.toFixed(0)}%` : formatSize(downloadBytes)} · {formatSpeed(downloadSpeed)}
                     </span>
                   </div>
                   <div className="n4-bar">
                     <div style={{ width: downloadProgress > 0 ? `${downloadProgress}%` : "35%" }} className={downloadProgress > 0 ? "" : "indet"}></div>
+                  </div>
+                </div>
+              )}
+              {downloadNotice && (
+                <div className="n4-toast-item">
+                  <div className="n4-toast-row">
+                    <span className={`n4-notice-ico ${downloadNotice.kind}`}>
+                      <i className={`fa ${downloadNotice.kind === "done" ? "fa-check-circle" : downloadNotice.kind === "error" ? "fa-exclamation-circle" : "fa-download"}`}></i>
+                    </span>
+                    <span className="n4-toast-name" title={downloadNotice.name}>
+                      {downloadNotice.kind === "done"
+                        ? `已下载 ${downloadNotice.name}`
+                        : downloadNotice.kind === "error"
+                          ? `下载失败：${downloadNotice.name}`
+                          : `${downloadNotice.name} 已开始下载`}
+                    </span>
                   </div>
                 </div>
               )}

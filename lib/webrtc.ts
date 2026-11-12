@@ -54,6 +54,11 @@ const HEADER_SIZE = 12;
 const CHUNK_PAYLOAD = 64 * 1024; // 64KB，远低于各浏览器 SCTP 单消息上限
 const BUFFER_HIGH_WATER = 1 * 1024 * 1024;
 const BUFFER_LOW_WATER = 256 * 1024;
+// 应用层流控（v3）：接收方按「已落盘字节」回 ack，发送方未被 ack 的在途量
+// 不超过 SEND_WINDOW。慢速接收端（如手机浏览器 OPFS 写入慢）不会被冲垮连接。
+const FLUSH_AT_BYTES = 1 * 1024 * 1024; // 接收端攒够 1MB 合并写一次
+const ACK_EVERY_BYTES = 1 * 1024 * 1024;
+const SEND_WINDOW_BYTES = 4 * 1024 * 1024;
 const POLL_TIMEOUT_MS = 10 * 60_000; // 与服务端房间 TTL 一致
 
 const STUN = {
@@ -68,7 +73,8 @@ type ControlMsg =
   | { type: "error"; message: string }
   | { type: "all-done" }
   | { type: "ping" }
-  | { type: "pong" };
+  | { type: "pong" }
+  | { type: "ack"; index: number; bytes: number };
 
 interface RecvSlot {
   meta: FileMeta;
@@ -82,6 +88,10 @@ interface RecvSlot {
   opfsHandle: any | null;
   opfsWritable: any | null;
   writeChain: Promise<void>;
+  written: number; // 已真正落盘字节（ack 依据）
+  pending: Uint8Array[]; // 待合并写出的分块
+  pendingBytes: number;
+  lastAckBytes: number;
   memChunks: ArrayBuffer[] | null; // 回退模式
   sessionId: string;
 }
@@ -101,10 +111,10 @@ export class P2PConnection {
   private _onFileReady?: (file: ReceivedFile) => void;
   private _onStatus?: (s: string) => void;
   private _onAllDone?: () => void;
-  private _onDisconnected?: () => void;
+  private _onDisconnected?: (detail: string) => void;
 
   private recvSlots = new Map<number, RecvSlot>();
-  private sendSlots = new Map<number, { meta: FileMeta; sent: number; lastAt: number; lastBytes: number; speed: number; done: boolean }>();
+  private sendSlots = new Map<number, { meta: FileMeta; sent: number; lastAt: number; lastBytes: number; speed: number; done: boolean; acked: number; windowOff: boolean }>();
   private keepAliveTimer: ReturnType<typeof setInterval> | null = null;
   private lastPongAt = 0;
   private noResponseWarned = false;
@@ -145,7 +155,7 @@ export class P2PConnection {
   setOnFileReady(cb: (file: ReceivedFile) => void) { this._onFileReady = cb; }
   setOnStatus(cb: (s: string) => void) { this._onStatus = cb; }
   setOnAllDone(cb: () => void) { this._onAllDone = cb; }
-  setOnDisconnected(cb: () => void) { this._onDisconnected = cb; }
+  setOnDisconnected(cb: (detail: string) => void) { this._onDisconnected = cb; }
 
   // ── 信令 ─────────────────────────────────────────────────
 
@@ -254,7 +264,7 @@ export class P2PConnection {
     const msg: ControlMsg = { type: "file-list", files };
     this.ctrlCh.send(JSON.stringify(msg));
     files.forEach((f, i) => {
-      this.sendSlots.set(i, { meta: f, sent: 0, lastAt: performance.now(), lastBytes: 0, speed: 0, done: false });
+      this.sendSlots.set(i, { meta: f, sent: 0, lastAt: performance.now(), lastBytes: 0, speed: 0, done: false, acked: 0, windowOff: false });
     });
     this._onStatus?.(`已发送 ${files.length} 个文件的清单`);
   }
@@ -263,6 +273,66 @@ export class P2PConnection {
     if (!this.ctrlCh || this.ctrlCh.readyState !== "open") return;
     const msg: ControlMsg = { type: "all-done" };
     this.ctrlCh.send(JSON.stringify(msg));
+  }
+
+  // 等接收方 ack 追上来：未确认在途量超过窗口就暂停发送。
+  // 对端若从未回 ack（例如旧版本页面），6 秒后退回纯 bufferedAmount 背压，避免死等。
+  private async waitForAckWindow(index: number, offset: number): Promise<void> {
+    const slot = this.sendSlots.get(index);
+    if (!slot || slot.windowOff) return;
+    const waitStart = Date.now();
+    let lastAck = slot.acked;
+    let lastAdvance = Date.now();
+    while (offset - slot.acked > SEND_WINDOW_BYTES) {
+      if (this.closed || !this.dataCh || this.dataCh.readyState !== "open") {
+        throw new Error("连接已断开");
+      }
+      if (slot.acked !== lastAck) {
+        lastAck = slot.acked;
+        lastAdvance = Date.now();
+      }
+      if (slot.acked === 0 && Date.now() - waitStart > 6000) {
+        slot.windowOff = true;
+        return;
+      }
+      if (Date.now() - lastAdvance > 60000) {
+        throw new Error("接收方长时间未确认，传输中断");
+      }
+      await new Promise((r) => setTimeout(r, 40));
+    }
+  }
+
+  // 把攒着的分块合并成一次写出（仅在 writeChain 内部调用，顺序有保证）
+  private async flushPending(slot: RecvSlot) {
+    if (slot.pendingBytes === 0) return;
+    const parts = slot.pending;
+    slot.pending = [];
+    slot.pendingBytes = 0;
+    let merged: Uint8Array;
+    if (parts.length === 1) {
+      merged = parts[0];
+    } else {
+      merged = new Uint8Array(parts.reduce((a, p) => a + p.byteLength, 0));
+      let o = 0;
+      for (const p of parts) {
+        merged.set(p, o);
+        o += p.byteLength;
+      }
+    }
+    if (slot.opfsWritable) {
+      await slot.opfsWritable.write(merged);
+    } else if (slot.memChunks) {
+      slot.memChunks.push(merged.buffer as ArrayBuffer);
+    }
+    slot.written += merged.byteLength;
+  }
+
+  private maybeAck(index: number, slot: RecvSlot, force = false) {
+    if (!this.ctrlCh || this.ctrlCh.readyState !== "open") return;
+    if (!force && slot.written - slot.lastAckBytes < ACK_EVERY_BYTES) return;
+    slot.lastAckBytes = slot.written;
+    const msg: ControlMsg = { type: "ack", index, bytes: slot.written };
+    try { this.ctrlCh.send(JSON.stringify(msg)); } catch { /* ignore */ }
   }
 
   private waitForBufferDrain(): Promise<void> {
@@ -304,12 +374,13 @@ export class P2PConnection {
     }
     let slot = this.sendSlots.get(index);
     if (!slot) {
-      slot = { meta: { name: file.name, size: file.size }, sent: 0, lastAt: performance.now(), lastBytes: 0, speed: 0, done: false };
+      slot = { meta: { name: file.name, size: file.size }, sent: 0, lastAt: performance.now(), lastBytes: 0, speed: 0, done: false, acked: 0, windowOff: false };
       this.sendSlots.set(index, slot);
     }
 
     for (let offset = 0; offset < file.size; offset += CHUNK_PAYLOAD) {
       if (this.closed) throw new Error("连接已断开");
+      await this.waitForAckWindow(index, offset);
       await this.waitForBufferDrain();
       const slice = file.slice(offset, Math.min(offset + CHUNK_PAYLOAD, file.size));
       const buf = await slice.arrayBuffer();
@@ -438,6 +509,10 @@ export class P2PConnection {
         writeChain: Promise.resolve(),
         memChunks: null,
         sessionId: this.sessionId,
+        written: 0,
+        pending: [],
+        pendingBytes: 0,
+        lastAckBytes: 0,
       };
       this.recvSlots.set(index, slot);
     }
@@ -446,13 +521,14 @@ export class P2PConnection {
       const payload = raw.slice(HEADER_SIZE);
       slot.received += payload.byteLength;
       const s = slot;
+      const idx = index;
       s.writeChain = s.writeChain.then(async () => {
         await this.ensureWritable(s);
-        if (s.opfsWritable) {
-          await s.opfsWritable.write({ type: "write", position: offset, data: payload });
-        } else if (s.memChunks) {
-          s.memChunks.push(payload);
-        }
+        // 帧按序到达，直接顺序追加：攒满 1MB 合并写一次，慢速 OPFS 也跟得上
+        s.pending.push(new Uint8Array(payload));
+        s.pendingBytes += payload.byteLength;
+        if (s.pendingBytes >= FLUSH_AT_BYTES) await this.flushPending(s);
+        this.maybeAck(idx, s);
       }).catch(() => { /* 单帧写失败不拖垮链，完成时按大小校验提示 */ });
       const now = performance.now();
       const dt = (now - slot.lastUpdate) / 1000;
@@ -468,6 +544,8 @@ export class P2PConnection {
       // 等此前分块全部落盘后再收尾（0 字节文件也在这里落成空文件）
       s.writeChain = s.writeChain.then(async () => {
         await this.ensureWritable(s);
+        await this.flushPending(s);
+        this.maybeAck(index, s, true);
         await this.finalizeReceived(index, s);
       }).catch(() => {});
       this.emitProgress();
@@ -527,8 +605,14 @@ export class P2PConnection {
   private fireDisconnected() {
     if (this.disconnectFired || this.closed) return;
     this.disconnectFired = true;
+    const sent = [...this.sendSlots.values()].reduce((a, s) => a + s.sent, 0);
+    const recvd = [...this.recvSlots.values()].reduce((a, s) => a + s.received, 0);
+    const detail =
+      `ice=${this.pc?.iceConnectionState ?? "?"} conn=${this.pc?.connectionState ?? "?"} ` +
+      `ctrl=${this.ctrlCh?.readyState ?? "?"} data=${this.dataCh?.readyState ?? "?"} ` +
+      `sent=${sent} recv=${recvd} ua=${(typeof navigator !== "undefined" ? navigator.userAgent : "").slice(0, 90)}`;
     this._onStatus?.("连接已断开");
-    this._onDisconnected?.();
+    this._onDisconnected?.(detail);
   }
 
   close() {
@@ -645,6 +729,10 @@ export class P2PConnection {
           writeChain: Promise.resolve(),
           memChunks: null,
           sessionId: this.sessionId,
+          written: 0,
+          pending: [],
+          pendingBytes: 0,
+          lastAckBytes: 0,
         });
       });
       this._onFileList?.(clean);
@@ -653,6 +741,9 @@ export class P2PConnection {
       this._onStatus?.(msg.message);
     } else if (msg.type === "all-done") {
       this._onAllDone?.();
+    } else if (msg.type === "ack") {
+      const s = this.sendSlots.get(msg.index);
+      if (s && msg.bytes > s.acked) s.acked = msg.bytes;
     } else if (msg.type === "ping") {
       if (this.ctrlCh && this.ctrlCh.readyState === "open") {
         try { this.ctrlCh.send(JSON.stringify({ type: "pong" })); } catch { /* ignore */ }

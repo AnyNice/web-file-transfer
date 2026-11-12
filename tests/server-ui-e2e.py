@@ -26,7 +26,7 @@ with sync_playwright() as pw:
         print("upload ok")
         page.get_by_text("ui-up-3mb.bin").first.wait_for(timeout=10000)
         print("listed ok")
-        row = page.locator("div.n4-fcard", has_text="ui-up-3mb.bin")
+        row = page.locator("div.n4-frow", has_text="ui-up-3mb.bin")
         row.get_by_title("删除").click()
         page.wait_for_timeout(1500)
         assert page.get_by_text("ui-up-3mb.bin").count() == 0, "file still listed after delete"

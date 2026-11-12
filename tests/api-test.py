@@ -3,7 +3,7 @@
 环境变量：WFT_BASE(默认 http://127.0.0.1:3000) WFT_WORK(项目目录，读口令与落盘校验)
 用法：python tests/api-test.py
 """
-import glob, hashlib, http.cookiejar, json, os, random, shutil, socket, sys, urllib.request, urllib.error
+import glob, hashlib, http.cookiejar, json, os, random, shutil, socket, sys, urllib.request, urllib.error, urllib.parse
 
 BASE = os.environ.get("WFT_BASE", "http://127.0.0.1:3000")
 WORK = os.environ.get("WFT_WORK", os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -53,6 +53,20 @@ s, _, _ = req(opener, "POST", "/api/auth", json.dumps({"code": "000000" if code 
 check("错误口令 = 401", s == 401, f"got {s}")
 s, _, _ = req(opener, "POST", "/api/auth", json.dumps({"code": code}).encode(), {"Content-Type": "application/json"})
 check("正确口令登录 = 200", s == 200, f"got {s}")
+
+# 2.5) 状态守卫：若管理员已把中转目录切到别处，先记录、测试期间切回默认，结尾恢复
+initial_dir = ""
+req(opener, "GET", "/api/admin/auth")
+_guard_code_file = os.path.join(WORK, "data/admin-code.txt")
+if os.path.exists(_guard_code_file):
+    _gc = open(_guard_code_file, encoding="utf-8").read().strip()
+    req(opener, "POST", "/api/admin/auth", json.dumps({"code": _gc}).encode(), {"Content-Type": "application/json"})
+    s, _, body = req(opener, "GET", "/api/admin/settings")
+    if s == 200:
+        initial_dir = json.loads(body).get("configuredDir") or ""
+        if initial_dir:
+            req(opener, "PUT", "/api/admin/settings", json.dumps({"storageDir": ""}).encode(), {"Content-Type": "application/json"})
+print(f"[guard] initial storage dir: {initial_dir or '(default)'}")
 
 # 3) 上传完整性（多种大小）
 def multipart_upload(name, data, extra_headers=None, boundary="----PyTestBoundary7MA4YWxk"):
@@ -213,7 +227,10 @@ check("日志可下载", s == 200 and marker.encode() in body, f"{s}")
 # 12) 管理员与中转目录切换
 s, _, _ = req(plain, "GET", "/api/admin/settings")
 check("未登录 GET 管理设置 = 401", s == 401, f"got {s}")
-s, _, _ = req(opener, "GET", "/api/admin/settings")
+cj3 = http.cookiejar.CookieJar()
+opener3 = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj3))
+req(opener3, "POST", "/api/auth", json.dumps({"code": code}).encode(), {"Content-Type": "application/json"})
+s, _, _ = req(opener3, "GET", "/api/admin/settings")
 check("仅普通登录 GET 管理设置 = 403", s == 403, f"got {s}")
 req(opener, "GET", "/api/admin/auth")  # 触发管理员口令文件生成
 admin_code = open(os.path.join(WORK, "data/admin-code.txt"), encoding="utf-8").read().strip()
@@ -246,7 +263,31 @@ names = [f["name"] for f in json.loads(body)["files"]] if s == 200 else []
 check("恢复后列表回到原目录", "1.txt" in names and "probe.txt" not in names, f"{names}")
 shutil.rmtree(alt_dir, ignore_errors=True)
 
+# 13) 批量打包下载（多选 ZIP）
+s, _, _ = req(plain, "GET", "/api/files/batch-download?p=1.txt")
+check("未登录批量下载 = 401", s == 401, f"got {s}")
+s, _, _ = req(opener, "GET", "/api/files/batch-download")
+check("未选文件批量下载 = 400", s == 400, f"got {s}")
+s, _, _ = req(opener, "GET", "/api/files/batch-download?p=" + urllib.parse.quote("../secret"))
+check("批量下载越界路径 = 400", s == 400, f"got {s}")
+multipart_upload("batch-a.txt", b"batch probe")
+s, _, body = req(opener, "GET", "/api/files/batch-download?p=batch-a.txt&p=dir1")
+import io as _io, zipfile as _zf
+_names = []
+if s == 200:
+    try:
+        _names = _zf.ZipFile(_io.BytesIO(body)).namelist()
+    except Exception:
+        _names = []
+check("批量打包含文件与文件夹内容", s == 200 and "batch-a.txt" in _names and any(n.startswith("dir1/") for n in _names), f"{s} {_names}")
+req(opener, "DELETE", "/api/files/batch-a.txt")
+
 clean_test_artifacts()
+
+# 状态守卫恢复：把中转目录切回测试开始前的设置
+if initial_dir:
+    req(opener, "PUT", "/api/admin/settings", json.dumps({"storageDir": initial_dir}).encode(), {"Content-Type": "application/json"})
+    print(f"[guard] restored storage dir: {initial_dir}")
 
 print(f"\n==== {len(passed)} passed, {len(failed)} failed ====")
 if failed:
